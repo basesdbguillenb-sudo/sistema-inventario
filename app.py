@@ -2206,6 +2206,16 @@ with gr.Blocks() as erp_interfaz:
     # Eventos Pestaña 4 y 5 (Auditoría y Seguridad)
     btn_refrescar_auditoria.click(fn=cargar_datos_auditoria, inputs=[], outputs=tabla_auditoria)
     btn_respaldo.click(fn=generar_respaldo_manual, inputs=[], outputs=[archivo_respaldo, msg_respaldo])
+    
+    btn_restaurar.click(
+        fn=restaurar_base_datos, 
+        inputs=[archivo_subir_respaldo], 
+        outputs=[msg_restaurar]
+    ).then(
+        fn=cargar_todo_ui, inputs=[], 
+        outputs=[tabla_inventario, serie_asignar, custodio_asignar, serie_liberar, serie_editar, tabla_funcionarios, buscar_func_combo, buscar_usuario_combo, custodio_mantenimiento]
+    )
+    
     tabla_usuarios.select(fn=seleccionar_usuario_tabla, inputs=[tabla_usuarios], outputs=[usuario_db_in, rol_db_in, buscar_usuario_combo])
     buscar_usuario_combo.change(fn=cargar_datos_usuario_form, inputs=[buscar_usuario_combo], outputs=[usuario_db_in, rol_db_in])
     btn_limpiar_usr.click(fn=lambda: ("", "admin", "", gr.update(value=None)), inputs=[], outputs=[usuario_db_in, rol_db_in, clave_db_in, buscar_usuario_combo])
