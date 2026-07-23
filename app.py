@@ -1327,7 +1327,8 @@ with gr.Blocks() as erp_interfaz:
     btn_descargar_reporte.click(fn=descargar_reporte_mantenimiento, inputs=[registro_eliminar], outputs=[archivo_reporte_descarga, msg_eliminar])
     btn_eliminar_mant.click(fn=eliminar_mantenimiento, inputs=[registro_eliminar], outputs=[msg_eliminar]).then(fn=obtener_mantenimientos_lista_por_funcionario, inputs=[custodio_mantenimiento], outputs=[registro_eliminar]).then(fn=cargar_historial_por_funcionario, inputs=[custodio_mantenimiento], outputs=[tabla_mantenimientos])
 
-    registro_eliminar.change(fn=cargar_datos_mantenimiento_edicion, inputs=[registro_eliminar], outputs=[edit_mant_fecha, edit_mant_proximo, edit_mant_tipo, edit_mant_tecnico, edit_mant_desc, edit_mant_costo])
+    registro_eliminar.change(fn=cargar_datos_mantenimiento_edicion, inputs=[registro_eliminar], outputs=[edit_mant_fecha, edit_mant_proximo, edit_mant_tipo, edit_mant_tecnico, edit_mant_desc, edit_mant_costo, visor_pdf_edicion])
+    
     btn_guardar_edicion_mant.click(fn=guardar_edicion_mantenimiento, inputs=[registro_eliminar, edit_mant_fecha, edit_mant_tipo, edit_mant_tecnico, edit_mant_desc, edit_mant_costo, edit_mant_proximo], outputs=[msg_edicion_mant]).then(fn=cargar_historial_por_funcionario, inputs=[custodio_mantenimiento], outputs=[tabla_mantenimientos])
 
     # Eventos Pestaña 4
