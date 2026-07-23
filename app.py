@@ -39,7 +39,7 @@ except Exception as e:
     print(f"⚠️ ADVERTENCIA: Error configurando Gemini: {e}")
     gemini_client = None
 
-# --- 1.1 MOTOR DE IA CON REINTENTOS AUTOMÁTICOS (SOLUCIÓN ERROR 503) ---
+# --- 1.1 MOTOR DE IA CON REINTENTOS AUTOMÁTICOS ---
 def llamar_gemini_con_reintentos(prompt, max_reintentos=4):
     """Maneja errores 503 (Servidor saturado) o 429 reintentando automáticamente."""
     for intento in range(max_reintentos):
@@ -57,7 +57,7 @@ def llamar_gemini_con_reintentos(prompt, max_reintentos=4):
             else:
                 raise e
 
-# --- MOTOR RESPALDO AUTOMÁTICO ---
+# --- MOTOR RESPALDO Y RESTAURACIÓN AUTOMÁTICO ---
 def obtener_todos_los_registros(tabla):
     """Extrae todos los registros de una tabla en Supabase manejando la paginación."""
     datos = []
@@ -103,6 +103,32 @@ def generar_respaldo_manual(request: gr.Request):
         registrar_auditoria(usuario, "Generó descarga manual del respaldo de la base de datos.")
         return gr.update(value=ruta, visible=True), "✅ Respaldo generado y listo para descargar."
     return gr.update(visible=False, value=None), "❌ Error al generar el respaldo."
+
+def restaurar_base_datos(archivo_json, request: gr.Request):
+    usuario = request.username if request else "Sistema"
+    if not archivo_json:
+        return "⚠️ Debes seleccionar un archivo JSON de respaldo."
+    
+    try:
+        ruta_archivo = archivo_json.name if hasattr(archivo_json, 'name') else archivo_json
+        with open(ruta_archivo, "r", encoding="utf-8") as f:
+            datos_respaldo = json.load(f)
+            
+        tablas_orden = ["usuarios_sistema", "funcionarios", "ordenes_compra", "equipos", "mantenimientos", "auditoria_sistema"]
+        total_restaurados = 0
+        
+        for tabla in tablas_orden:
+            if tabla in datos_respaldo and datos_respaldo[tabla]:
+                registros = datos_respaldo[tabla]
+                for i in range(0, len(registros), 500):
+                    bloque = registros[i:i + 500]
+                    supabase.table(tabla).upsert(bloque).execute()
+                    total_restaurados += len(bloque)
+                    
+        registrar_auditoria(usuario, f"Restauró la base de datos desde archivo de respaldo ({total_restaurados} registros procesados).")
+        return f"✅ Base de datos restaurada con éxito. Se procesaron {total_restaurados} registros."
+    except Exception as e:
+        return f"❌ Error al restaurar la base de datos: {e}"
 
 # --- 2. SEGURIDAD Y AUDITORÍA ---
 def verificar_credenciales(usuario, clave):
@@ -1606,7 +1632,6 @@ def guardar_edicion_equipo(serie_combo, serie_nueva, marca_nueva, modelo_nuevo, 
         proveedor_actual = (ord_data.get("razon_social_proveedor", "") or "").strip()
         nombre_comercial_actual = (ord_data.get("nombre_comercial", "") or "").strip()
 
-        # Si el número de serie fue modificado, verificar que no choque con otro equipo existente
         if serie_nueva_limpia != serie_limpia:
             res_dup = supabase.table("equipos").select("id").eq("numero_serie", serie_nueva_limpia).execute()
             if res_dup.data:
@@ -1622,7 +1647,6 @@ def guardar_edicion_equipo(serie_combo, serie_nueva, marca_nueva, modelo_nuevo, 
         }
         mensaje_extra = ""
 
-        # Actualización de Custodio Asignado (funcionario)
         if custodio_nuevo:
             custodio_str = str(custodio_nuevo).strip()
             if custodio_str == "Sin Asignar - BODEGA":
@@ -1663,7 +1687,6 @@ def guardar_edicion_equipo(serie_combo, serie_nueva, marca_nueva, modelo_nuevo, 
 
         supabase.table("equipos").update(datos_actualizar_equipo).eq("id", equipo_id).execute()
 
-        # Si se cambió la serie, actualizar el historial de mantenimientos para no dejarlos huérfanos
         if serie_nueva_limpia != serie_limpia:
             supabase.table("mantenimientos").update({"numero_serie": serie_nueva_limpia}).ilike("numero_serie", f"{serie_limpia}%").execute()
             mensaje_extra += " (Serie actualizada también en historiales)."
@@ -2048,13 +2071,21 @@ with gr.Blocks() as erp_interfaz:
                         mensaje_clave = gr.Textbox(show_label=False, interactive=False)
                 
                 gr.Markdown("---")
-                gr.Markdown("### 💾 Respaldo de Base de Datos (Backup)")
-                gr.Markdown("El sistema descarga y empaqueta automáticamente toda la base de datos (JSON) en la carpeta `respaldos` cada 24 horas. También puedes generar un respaldo manual en cualquier momento presionando este botón:")
+                gr.Markdown("### 💾 Respaldo y Restauración de Base de Datos")
+                gr.Markdown("Genera descargas periódicas de seguridad o restaura una copia previamente exportada.")
                 with gr.Row():
                     btn_respaldo = gr.Button("⬇️ Generar y Descargar Respaldo Manual", variant="primary")
                 with gr.Row():
                     msg_respaldo = gr.Textbox(show_label=False, interactive=False)
                     archivo_respaldo = gr.File(label="Archivo de Respaldo Generado (JSON)", visible=False)
+                
+                gr.Markdown("---")
+                gr.Markdown("### ♻️ Restaurar Sistema desde Respaldo")
+                gr.Markdown("*(Sube un archivo `.json` de respaldo previo para restaurar todos los datos)*")
+                with gr.Row():
+                    archivo_subir_respaldo = gr.File(label="Seleccionar Archivo de Respaldo (.json)", file_types=[".json"])
+                    btn_restaurar = gr.Button("🔄 Cargar y Restaurar Datos", variant="primary")
+                msg_restaurar = gr.Textbox(show_label=False, interactive=False)
 
     # =========================================================================================
     # ======================== SECCIÓN ÚNICA DE EVENTOS (PREVIENE ERRORES) ====================
@@ -2107,7 +2138,6 @@ with gr.Blocks() as erp_interfaz:
     
     btn_liberar.click(fn=liberar_equipo, inputs=[serie_liberar], outputs=[mensaje_liberar, tabla_inventario, serie_asignar, serie_liberar])
 
-    # Evento: Dar de Baja equipo (Borrado Suave / Lógico)
     btn_eliminar_equipo.click(
         fn=eliminar_equipo_inventario,
         inputs=[serie_eliminar_equipo, motivo_eliminar_equipo],
@@ -2261,5 +2291,4 @@ app = gr.mount_gradio_app(app, erp_interfaz, path="/", auth=verificar_credencial
 
 if __name__ == "__main__":
     import uvicorn
-    # En tu PC local correrá en http://localhost:10000
     uvicorn.run(app, host="0.0.0.0", port=10000)
