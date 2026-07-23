@@ -1,1 +1,11 @@
-gradiopandasfpdfpypdfpython-dotenvsupabasegoogle-genaiPillowopenpyxl
+gradio
+pandas
+fpdf
+pypdf
+python-dotenv
+supabase
+google-genai
+Pillow
+openpyxl
+fastapi
+uvicorn
