@@ -12,12 +12,13 @@ from pypdf import PdfReader
 from dotenv import load_dotenv
 import concurrent.futures
 
-# --- CONFIGURACIÓN DE SUPABASE Y GEMINI ---
+# --- CONFIGURACIÓN DE SUPABASE Y GEMINI PARA LA NUBE ---
 from supabase import create_client, Client, ClientOptions
 from google import genai
 
 load_dotenv()
 
+# El .strip() asegura que el servidor ignore espacios en blanco accidentales en tus claves
 supabase_url = os.environ.get("SUPABASE_URL", "").strip()
 supabase_key = os.environ.get("SUPABASE_KEY", "").strip()
 gemini_key = os.environ.get("GEMINI_API_KEY", "").strip()
@@ -38,8 +39,9 @@ except Exception as e:
     print(f"⚠️ ADVERTENCIA: Error configurando Gemini: {e}")
     gemini_client = None
 
-# --- 1.1 MOTOR DE IA CON REINTENTOS AUTOMÁTICOS ---
+# --- 1.1 MOTOR DE IA CON REINTENTOS AUTOMÁTICOS (SOLUCIÓN ERROR 503) ---
 def llamar_gemini_con_reintentos(prompt, max_reintentos=4):
+    """Maneja errores 503 (Servidor saturado) o 429 reintentando automáticamente."""
     for intento in range(max_reintentos):
         try:
             return gemini_client.models.generate_content(model='gemini-2.5-flash', contents=prompt)
@@ -47,29 +49,33 @@ def llamar_gemini_con_reintentos(prompt, max_reintentos=4):
             error_str = str(e)
             if '503' in error_str or '429' in error_str or 'UNAVAILABLE' in error_str:
                 if intento < max_reintentos - 1:
-                    tiempo_espera = 2 ** intento
-                    print(f"⚠️ Servidor IA saturado. Reintentando en {tiempo_espera}s... (Intento {intento + 1}/{max_reintentos})")
+                    tiempo_espera = 2 ** intento  # Espera 1s, 2s, 4s...
+                    print(f"⚠️ Servidor IA saturado (503). Reintentando en {tiempo_espera}s... (Intento {intento + 1}/{max_reintentos})")
                     time.sleep(tiempo_espera)
                 else:
-                    raise Exception("Los servidores de IA de Google están saturados. Intenta de nuevo en un par de minutos.")
+                    raise Exception("Los servidores de IA de Google están experimentando demasiada demanda. Por favor, intenta de nuevo en un par de minutos.")
             else:
                 raise e
 
 # --- MOTOR RESPALDO AUTOMÁTICO ---
 def obtener_todos_los_registros(tabla):
+    """Extrae todos los registros de una tabla en Supabase manejando la paginación."""
     datos = []
     rango_inicio = 0
     rango_fin = 999
     while True:
         res = supabase.table(tabla).select("*").range(rango_inicio, rango_fin).execute()
-        if not res.data: break
+        if not res.data:
+            break
         datos.extend(res.data)
-        if len(res.data) < 1000: break
+        if len(res.data) < 1000:
+            break
         rango_inicio += 1000
         rango_fin += 1000
     return datos
 
 def respaldar_base_datos():
+    """Descarga toda la BD y la guarda en un archivo JSON."""
     tablas = ["usuarios_sistema", "auditoria_sistema", "equipos", "funcionarios", "ordenes_compra", "mantenimientos"]
     carpeta_respaldos = os.path.join(tempfile.gettempdir(), "respaldos")
     os.makedirs(carpeta_respaldos, exist_ok=True)
@@ -89,15 +95,6 @@ def respaldar_base_datos():
     except Exception as e:
         print(f"❌ Error en respaldo: {e}")
         return None
-
-def loop_respaldo_diario():
-    time.sleep(5)
-    while True:
-        respaldar_base_datos()
-        time.sleep(86400)
-
-hilo_respaldo = threading.Thread(target=loop_respaldo_diario, daemon=True)
-hilo_respaldo.start()
 
 def generar_respaldo_manual(request: gr.Request):
     usuario = request.username if request else "Sistema"
@@ -1892,17 +1889,16 @@ with gr.Blocks() as erp_interfaz:
                             gr.Markdown("---")
                             gr.Markdown("**C. Edición Rápida (Formulario) — Edita TODOS los datos del equipo:**")
                             serie_editar = gr.Dropdown(label="Selecciona Cualquier Equipo", choices=[])
-                            serie_nueva_editar = gr.Textbox(label="Número de Serie (Edítalo con precaución)")
+                            serie_nueva_editar = gr.Textbox(label="Número de Serie")
                             with gr.Row():
                                 marca_editar = gr.Textbox(label="Marca")
                                 modelo_editar = gr.Textbox(label="Modelo")
-                                tipo_editar = gr.Textbox(label="Tipo de Equipo")
+                            tipo_editar = gr.Textbox(label="Tipo de Equipo")
                             with gr.Row():
                                 estado_editar = gr.Dropdown(label="Estado", choices=["Operativo", "En Mantenimiento", "De Baja", "Dañado", "Eliminado"])
                                 custodio_editar = gr.Dropdown(label="Custodio Asignado", choices=[], interactive=True, allow_custom_value=True)
-                            with gr.Row():
-                                proveedor_editar = gr.Textbox(label="Proveedor (Razón Social)")
-                                nombre_comercial_editar = gr.Textbox(label="Nombre Comercial")
+                            proveedor_editar = gr.Textbox(label="Proveedor (Razón Social)")
+                            nombre_comercial_editar = gr.Textbox(label="Nombre Comercial")
                             observaciones_editar = gr.Textbox(label="Observaciones del Equipo")
                             btn_guardar_edicion = gr.Button("💾 Guardar Cambios", variant="primary")
                             mensaje_edicion = gr.Textbox(show_label=False, interactive=False)
@@ -2248,6 +2244,12 @@ with gr.Blocks() as erp_interfaz:
         fn=obtener_series_disponibles, inputs=[], outputs=[serie_eliminar_equipo]
     )
 
-# --- INICIALIZACIÓN NATIVA PARA HUGGING FACE SPACES Y LOCAL ---
+# --- ADAPTACIÓN PARA RENDER Y USO LOCAL ---
+import fastapi
+app = fastapi.FastAPI()
+app = gr.mount_gradio_app(app, erp_interfaz, path="/", auth=verificar_credenciales)
+
 if __name__ == "__main__":
-    erp_interfaz.launch(server_name="0.0.0.0", auth=verificar_credenciales, theme=gr.themes.Soft())
+    import uvicorn
+    # En tu PC local correrá en http://localhost:10000
+    uvicorn.run(app, host="0.0.0.0", port=10000)
