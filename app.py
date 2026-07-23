@@ -349,7 +349,7 @@ def obtener_mantenimientos_lista_por_funcionario(funcionario_combo):
 
 def auto_completar_mantenimiento(serie_combo):
     try:
-        if not serie_combo: return gr.update(choices=[], value=None)
+        if not serie_combo: return gr.update(choices=[], value=None), gr.update()
         serie_ref = serie_combo[-1] if isinstance(serie_combo, list) and serie_combo else serie_combo
         serie_limpia = str(serie_ref).split(" - ")[0].strip()
         
@@ -358,8 +358,10 @@ def auto_completar_mantenimiento(serie_combo):
         if res.data and res.data[0].get("orden_id"):
             res_ord = supabase.table("ordenes_compra").select("razon_social_proveedor").eq("id", res.data[0]["orden_id"]).execute()
             if res_ord.data: proveedor = res_ord.data[0].get("razon_social_proveedor", "")
-        return gr.update(choices=[proveedor] if proveedor else [], value=proveedor)
-    except Exception: return gr.update(choices=[], value=None)
+        
+        # Corrección CRÍTICA: Retornar siempre 2 valores (Dropdown proveedor y Tabla Dataframe que se limpia si es necesario)
+        return gr.update(choices=[proveedor] if proveedor else [], value=proveedor), gr.update()
+    except Exception: return gr.update(choices=[], value=None), gr.update()
 
 def obtener_numero_reporte(proveedor):
     if not proveedor or str(proveedor).strip() == "" or str(proveedor).lower() == "mantenimiento interno": prefix = "INT"
@@ -380,17 +382,32 @@ def obtener_numero_reporte(proveedor):
                 except ValueError: pass
     return f"MNT-{prefix}-{str(max_num + 1).zfill(4)}"
 
-def registrar_y_generar_acta(funcionario_combo, serie_combo, fecha, tipo, checks, desc_extra, tecnico, costo, proximo, fotos_paths, foto_camara, nombre_admin, nombre_tecnico, nombre_func, request: gr.Request):
-    usuario = request.username if request else "Sistema"
-    if not funcionario_combo or not serie_combo or not fecha or not tipo: return "⚠️ Faltan datos.", [["-", "-", "-", "-", "-", "-", "-"]], gr.update(visible=False, value=None)
+# --- LÓGICA DEL ACUMULADOR DE FOTOS (CÁMARA CELULAR) ---
+def agregar_foto_camara(foto, estado):
+    """Acumula la foto tomada por la cámara en una lista (estado) y limpia la cámara."""
+    if not foto:
+        return estado, estado, None
+    nuevo_estado = estado.copy() if estado else []
+    nuevo_estado.append(foto)
+    # Retorna: 1) El nuevo estado (lista de fotos), 2) La galería visual (las muestra), 3) Limpia el gr.Image
+    return nuevo_estado, nuevo_estado, None
 
-    # Lógica combinada para manejar fotos de archivo normal y fotos de la cámara web/celular
-    if foto_camara:
-        if fotos_paths is None:
-            fotos_paths = []
-        elif not isinstance(fotos_paths, list):
-            fotos_paths = [fotos_paths]
-        fotos_paths.append(foto_camara)
+def registrar_y_generar_acta(funcionario_combo, serie_combo, fecha, tipo, checks, desc_extra, tecnico, costo, proximo, fotos_paths, estado_fotos_camara, nombre_admin, nombre_tecnico, nombre_func, request: gr.Request):
+    usuario = request.username if request else "Sistema"
+    if not funcionario_combo or not serie_combo or not fecha or not tipo: 
+        return "⚠️ Faltan datos obligatorios.", [["-", "-", "-", "-", "-", "-", "-"]], gr.update(visible=False, value=None), [], []
+
+    # Lógica combinada de fotos (Archivos subidos + Cámara acumulada)
+    if fotos_paths is None:
+        fotos_paths = []
+    elif not isinstance(fotos_paths, list):
+        fotos_paths = [fotos_paths]
+        
+    if estado_fotos_camara:
+        if isinstance(estado_fotos_camara, list):
+            fotos_paths.extend(estado_fotos_camara)
+        else:
+            fotos_paths.append(estado_fotos_camara)
 
     nombre_custodio = str(funcionario_combo).split(" - ")[0].strip() if funcionario_combo else "Sin Asignar"
     trabajos = ", ".join(checks) if checks else ""
@@ -402,17 +419,6 @@ def registrar_y_generar_acta(funcionario_combo, serie_combo, fecha, tipo, checks
     for s in serie_combo:
         serie_limpia = str(s).split(" - ")[0].strip()
         equipos_nombres.append(s)
-        try:
-            res_eq = supabase.table("equipos").select("orden_id, ordenes_compra(numero_orden_compra, numero_proceso_sercop)").ilike("numero_serie", f"{serie_limpia}%").execute()
-            if res_eq.data:
-                ord_data = res_eq.data[0].get("ordenes_compra")
-                if isinstance(ord_data, list) and ord_data: ord_data = ord_data[0]
-                elif not isinstance(ord_data, dict): ord_data = {}
-                if ord_data:
-                    num_ord = ord_data.get("numero_orden_compra") or ord_data.get("numero_proceso_sercop")
-                    if num_ord: ordenes_encontradas.add(str(num_ord).strip())
-        except Exception: pass
-
         try:
             supabase.table("mantenimientos").insert({
                 "numero_serie": serie_limpia, "fecha": fecha, "tipo_mantenimiento": tipo, "descripcion": desc_final,
@@ -457,6 +463,51 @@ def registrar_y_generar_acta(funcionario_combo, serie_combo, fecha, tipo, checks
                 pdf.line(x, y, x + anchos, y); pdf.set_xy(x, y + 2); pdf.set_font("Arial", 'B', 9); pdf.cell(anchos, 5, noms[i], 0, 2, 'C')
                 pdf.set_font("Arial", 'I', 8); pdf.set_x(x); pdf.cell(anchos, 4, roles[i], 0, 2, 'C')
 
+            # --- INICIO: LÓGICA DE FOTOS AJUSTADAS EN EL PDF ---
+            if fotos_paths:
+                try:
+                    from PIL import Image
+                    import uuid
+                    if not isinstance(fotos_paths, list): fotos_paths = [fotos_paths]
+                    
+                    pdf.add_page()
+                    pdf.set_y(15)
+                    pdf.set_font("Arial", 'B', 11)
+                    pdf.set_fill_color(220, 230, 241)
+                    pdf.cell(0, 8, "REGISTRO FOTOGRAFICO", ln=True, fill=True)
+                    pdf.ln(8)
+                    
+                    for img_path in fotos_paths:
+                        if not img_path: continue
+                        try:
+                            with Image.open(img_path) as img:
+                                img = img.convert('RGB')
+                                w_px, h_px = img.size
+                                aspect = h_px / w_px
+                                
+                            w_mm = 140 
+                            h_mm = w_mm * aspect
+                            
+                            if pdf.get_y() + h_mm > 270:
+                                pdf.add_page()
+                                pdf.set_y(15)
+                                
+                            x_pos = (210 - w_mm) / 2 
+                            
+                            temp_img_path = os.path.join(tempfile.gettempdir(), f"temp_{uuid.uuid4().hex}.jpg")
+                            img.save(temp_img_path, "JPEG", quality=85)
+                            
+                            pdf.image(temp_img_path, x=x_pos, y=pdf.get_y(), w=w_mm)
+                            pdf.set_y(pdf.get_y() + h_mm + 10) 
+                            
+                            try: os.remove(temp_img_path)
+                            except: pass
+                        except Exception as e:
+                            print(f"Error procesando una foto: {e}")
+                except Exception as e:
+                    print(f"Error general procesando fotos: {e}")
+            # --- FIN: LÓGICA DE FOTOS AJUSTADAS ---
+
             ruta_pdf = os.path.join(tempfile.gettempdir(), f"Reporte_{numero_reporte}.pdf")
             pdf.output(ruta_pdf)
 
@@ -469,8 +520,10 @@ def registrar_y_generar_acta(funcionario_combo, serie_combo, fecha, tipo, checks
 
     resumen = "\n".join(mensajes)
     hist = cargar_historial_por_funcionario(funcionario_combo) if funcionario_combo else [["-", "-", "-", "-", "-", "-", "-"]]
-    if ruta_pdf: return f"✅ Reporte {numero_reporte} generado.\n{resumen}", gr.update(value=hist), gr.update(value=ruta_pdf, visible=True)
-    return f"✅ Operación finalizada.\n{resumen}", gr.update(value=hist), gr.update(visible=False, value=None)
+    
+    # Retornamos listas vacías al final [] para limpiar la galería y el estado temporal de la cámara
+    if ruta_pdf: return f"✅ Reporte {numero_reporte} generado.\n{resumen}", gr.update(value=hist), gr.update(value=ruta_pdf, visible=True), [], []
+    return f"✅ Operación finalizada.\n{resumen}", gr.update(value=hist), gr.update(visible=False, value=None), [], []
 
 def descargar_reporte_mantenimiento(seleccion):
     if not seleccion: return gr.update(visible=False, value=None), "⚠️ Selecciona un registro."
@@ -504,7 +557,7 @@ def eliminar_mantenimiento(seleccion, request: gr.Request):
     except Exception as e: return f"❌ Error: {e}"
 
 def cargar_datos_mantenimiento_edicion(seleccion):
-    if not seleccion: return "", "", "", "", "", 0.0
+    if not seleccion: return "", "", "", "", "", 0.0, None
     try:
         numero_informe = seleccion.split(" | ")[0].strip()
         id_referencia = int(seleccion.split("id:")[-1])
@@ -515,18 +568,31 @@ def cargar_datos_mantenimiento_edicion(seleccion):
 
         if res.data:
             item = res.data[0]
+            fecha = (item.get("fecha") or "")[:10]
+            proximo = (item.get("proximo_mantenimiento") or "")[:10]
+            
+            ruta_pdf = None
+            url_storage = item.get("url_reporte_pdf")
+            if url_storage:
+                try:
+                    contenido = supabase.storage.from_("reportes-mantenimiento").download(url_storage)
+                    ruta_pdf = os.path.join(tempfile.gettempdir(), f"Temp_Edicion_{numero_informe}.pdf")
+                    with open(ruta_pdf, "wb") as f: f.write(contenido)
+                except Exception: pass
+                
             return (
-                item.get("fecha", ""),
-                item.get("proximo_mantenimiento", ""),
+                fecha,
+                proximo,
                 item.get("tipo_mantenimiento", ""),
                 item.get("tecnico_proveedor", ""),
                 item.get("descripcion", ""),
-                float(item.get("costo", 0.0))
+                float(item.get("costo", 0.0)),
+                ruta_pdf
             )
-        return "", "", "", "", "", 0.0
+        return "", "", "", "", "", 0.0, None
     except Exception as e:
         print(f"Error cargando edicion mant: {e}")
-        return "", "", "", "", "", 0.0
+        return "", "", "", "", "", 0.0, None
 
 def guardar_edicion_mantenimiento(seleccion, fecha, tipo, tecnico, desc, costo, proximo, request: gr.Request):
     usuario = request.username if request else "Sistema"
@@ -1028,6 +1094,7 @@ with gr.Blocks() as erp_interfaz:
         btn_logout = gr.Button("🚪 Cerrar Sesión", variant="stop", scale=1)
     
     with gr.Tabs():
+        # --- TAB 1: Análisis ---
         with gr.TabItem("1. Análisis Precontractual"):
             gr.Markdown("### 🧠 Auditoría Inteligente de Pliegos y TDRs")
             with gr.Row():
@@ -1039,6 +1106,7 @@ with gr.Blocks() as erp_interfaz:
                 with gr.Column(scale=2):
                     reporte_output = gr.Textbox(label="📊 Informe de Auditoría Detallado", lines=20)
 
+        # --- TAB 2: Inventario ---
         with gr.TabItem("2. Custodios e Inventario"):
             with gr.Row():
                 with gr.Column(scale=1):
@@ -1164,6 +1232,7 @@ with gr.Blocks() as erp_interfaz:
                             rep_mensaje = gr.Textbox(show_label=False, interactive=False)
                             rep_archivo = gr.File(label="Archivo Reporte", visible=False)
 
+        # --- TAB 3: Mantenimientos ---
         with gr.TabItem("3. Gestión de Mantenimientos"):
             gr.Markdown("### 🛠️ Registro Técnico y Generación de Reportes de Mantenimiento")
             with gr.Row():
@@ -1186,8 +1255,12 @@ with gr.Blocks() as erp_interfaz:
 
                     gr.Markdown("---")
                     with gr.Row():
-                        fotos_mantenimiento = gr.File(label="9. Evidencia (Subir Archivos)", file_count="multiple", file_types=["image"], type="filepath")
-                        foto_camara = gr.Image(label="📸 Tomar Foto Rápida (Cámara del dispositivo)", sources=["webcam", "upload"], type="filepath")
+                        fotos_mantenimiento = gr.File(label="9. Evidencia (Subir Archivos de PC/Galería)", file_count="multiple", file_types=["image"], type="filepath")
+                        with gr.Column():
+                            foto_camara = gr.Image(label="📸 Cámara (Toma una foto)", sources=["webcam"], type="filepath")
+                            btn_agregar_foto_camara = gr.Button("➕ Agregar esta foto y tomar otra", variant="secondary")
+                            galeria_camara = gr.Gallery(label="Fotos acumuladas para este reporte", show_label=True, columns=3, height=150)
+                            estado_fotos_camara = gr.State([])
 
                     gr.Markdown("---")
                     gr.Markdown("#### ✍️ Confirmar Nombres para las Firmas")
@@ -1210,27 +1283,39 @@ with gr.Blocks() as erp_interfaz:
                     msg_eliminar = gr.Textbox(show_label=False, interactive=False)
 
                     with gr.Accordion("✏️ Editar Registro Seleccionado (Planificación)", open=False):
-                        gr.Markdown("*(Nota: Actualiza los datos en la base y el historial, pero no modifica el PDF original ya firmado).*")
+                        gr.Markdown("*(Sigue los pasos para editar un registro)*")
+                        gr.Markdown("**Paso 1:** En el bloque superior, selecciona el **'1. Funcionario / Ubicación'**.")
+                        gr.Markdown("**Paso 2:** En el campo de arriba **'Selecciona Registro'**, escoge el mantenimiento que deseas editar.")
+                        gr.Markdown("**Paso 3:** Modifica los valores aquí abajo y guarda. (Nota: Esto actualiza la base de datos, pero el PDF original se mantiene intacto por auditoría).")
+                        
                         with gr.Row():
                             edit_mant_fecha = gr.Textbox(label="Fecha", elem_classes="fecha-calendario")
                             edit_mant_proximo = gr.Textbox(label="Próximo Mantenimiento", elem_classes="fecha-calendario")
+                        
                         edit_mant_tipo = gr.Dropdown(label="Tipo de Intervención", choices=["Preventivo", "Correctivo", "Revisión de Garantía", "De Baja", "Diagnóstico"])
                         edit_mant_tecnico = gr.Textbox(label="Técnico / Proveedor")
                         edit_mant_desc = gr.Textbox(label="Descripción / Trabajos", lines=3)
                         edit_mant_costo = gr.Number(label="Costo ($)", value=0.0)
+                        
                         btn_guardar_edicion_mant = gr.Button("💾 Guardar Cambios en el Registro", variant="primary")
                         msg_edicion_mant = gr.Textbox(show_label=False, interactive=False)
+                        
+                        gr.Markdown("---")
+                        gr.Markdown("📷 **Visor del Acta Original (Registro Fotográfico)**")
+                        visor_pdf_edicion = gr.File(label="Acta Original PDF", interactive=False)
 
                 with gr.Column(scale=2):
                     gr.Markdown("#### 📋 Historial Técnico")
                     gr.Markdown("*(Se actualiza automáticamente al seleccionar el Funcionario/Ubicación)*")
                     tabla_mantenimientos = gr.Dataframe(headers=["Fecha", "Tipo", "Responsable", "Equipo(s) Intervenido(s)", "Descripción", "Costo", "Próxima Revisión"], interactive=False, wrap=True)
 
+        # --- TAB 4: Auditoría ---
         with gr.TabItem("4. Auditoría de Sistema"):
             gr.Markdown("### 🕵️‍♂️ Bitácora Histórica (Inalterable)")
             btn_refrescar_auditoria = gr.Button("🔄 Refrescar Registro")
             tabla_auditoria = gr.Dataframe(headers=["Fecha y Hora", "Usuario", "Acción Ejecutada"], interactive=False, wrap=True)
 
+        # --- TAB 5: Seguridad ---
         with gr.TabItem("5. Centro de Seguridad y Accesos"):
             panel_denegado = gr.Group(visible=False)
             with panel_denegado:
@@ -1275,7 +1360,9 @@ with gr.Blocks() as erp_interfaz:
                     btn_restaurar = gr.Button("🔄 Cargar y Restaurar Datos", variant="primary")
                 msg_restaurar = gr.Textbox(show_label=False, interactive=False)
 
-    # Agrupamos TODOS los eventos al final para evitar errores de tipo NameError (componentes no definidos).
+    # ==========================================
+    # CONEXIÓN DE EVENTOS (BOTONES Y TABLAS)
+    # ==========================================
 
     # Eventos Pestaña 1
     btn_analizar.click(fn=analizar_fase_precontractual, inputs=[archivos_input, referencias_input, enlaces_input], outputs=reporte_output)
@@ -1296,7 +1383,6 @@ with gr.Blocks() as erp_interfaz:
     btn_asignar.click(fn=asignar_custodio_equipo, inputs=[serie_asignar, custodio_asignar, garantia_input], outputs=[mensaje_asignar, tabla_inventario, serie_asignar, custodio_asignar, serie_liberar])
     btn_analizar_excel.click(fn=analizar_excel_masivo, inputs=[excel_input], outputs=[mensaje_masivo, tabla_preview])
     
-    # ESTOS ERAN LOS BOTONES QUE CAUSABAN EL NameError
     btn_confirmar_masivo.click(fn=confirmar_asignacion_masiva, inputs=[tabla_preview], outputs=[mensaje_masivo]).then(fn=cargar_todo_ui, inputs=[], outputs=[tabla_inventario, serie_asignar, custodio_asignar, serie_liberar, serie_editar, tabla_funcionarios, buscar_func_combo, buscar_usuario_combo, custodio_mantenimiento])
     btn_sincronizar.click(fn=cargar_todo_ui, inputs=[], outputs=[tabla_inventario, serie_asignar, custodio_asignar, serie_liberar, serie_editar, tabla_funcionarios, buscar_func_combo, buscar_usuario_combo, custodio_mantenimiento])
 
@@ -1320,9 +1406,16 @@ with gr.Blocks() as erp_interfaz:
     # Eventos Pestaña 3
     custodio_mantenimiento.change(fn=cargar_equipos_de_funcionario, inputs=[custodio_mantenimiento], outputs=[serie_mantenimiento, nombre_funcionario_firma]).then(fn=cargar_historial_por_funcionario, inputs=[custodio_mantenimiento], outputs=[tabla_mantenimientos]).then(fn=obtener_mantenimientos_lista_por_funcionario, inputs=[custodio_mantenimiento], outputs=[registro_eliminar])
     
-    serie_mantenimiento.change(fn=auto_completar_mantenimiento, inputs=[serie_mantenimiento], outputs=[tecnico_proveedor])
+    serie_mantenimiento.change(fn=auto_completar_mantenimiento, inputs=[serie_mantenimiento], outputs=[tecnico_proveedor, tabla_mantenimientos])
     
-    btn_guardar_mantenimiento.click(fn=registrar_y_generar_acta, inputs=[custodio_mantenimiento, serie_mantenimiento, fecha_mantenimiento, tipo_mantenimiento, desc_checks, desc_mantenimiento, tecnico_proveedor, costo_mantenimiento, proximo_mantenimiento, fotos_mantenimiento, foto_camara, nombre_admin_firma, nombre_tecnico_firma, nombre_funcionario_firma], outputs=[msg_mantenimiento, tabla_mantenimientos, archivo_acta_descarga]).then(fn=obtener_mantenimientos_lista_por_funcionario, inputs=[custodio_mantenimiento], outputs=[registro_eliminar])
+    # Lógica de Acumulador de Cámara
+    btn_agregar_foto_camara.click(
+        fn=agregar_foto_camara,
+        inputs=[foto_camara, estado_fotos_camara],
+        outputs=[estado_fotos_camara, galeria_camara, foto_camara]
+    )
+
+    btn_guardar_mantenimiento.click(fn=registrar_y_generar_acta, inputs=[custodio_mantenimiento, serie_mantenimiento, fecha_mantenimiento, tipo_mantenimiento, desc_checks, desc_mantenimiento, tecnico_proveedor, costo_mantenimiento, proximo_mantenimiento, fotos_mantenimiento, estado_fotos_camara, nombre_admin_firma, nombre_tecnico_firma, nombre_funcionario_firma], outputs=[msg_mantenimiento, tabla_mantenimientos, archivo_acta_descarga, estado_fotos_camara, galeria_camara]).then(fn=obtener_mantenimientos_lista_por_funcionario, inputs=[custodio_mantenimiento], outputs=[registro_eliminar])
     
     btn_descargar_reporte.click(fn=descargar_reporte_mantenimiento, inputs=[registro_eliminar], outputs=[archivo_reporte_descarga, msg_eliminar])
     btn_eliminar_mant.click(fn=eliminar_mantenimiento, inputs=[registro_eliminar], outputs=[msg_eliminar]).then(fn=obtener_mantenimientos_lista_por_funcionario, inputs=[custodio_mantenimiento], outputs=[registro_eliminar]).then(fn=cargar_historial_por_funcionario, inputs=[custodio_mantenimiento], outputs=[tabla_mantenimientos])
@@ -1331,10 +1424,8 @@ with gr.Blocks() as erp_interfaz:
     
     btn_guardar_edicion_mant.click(fn=guardar_edicion_mantenimiento, inputs=[registro_eliminar, edit_mant_fecha, edit_mant_tipo, edit_mant_tecnico, edit_mant_desc, edit_mant_costo, edit_mant_proximo], outputs=[msg_edicion_mant]).then(fn=cargar_historial_por_funcionario, inputs=[custodio_mantenimiento], outputs=[tabla_mantenimientos])
 
-    # Eventos Pestaña 4
+    # Eventos Pestaña 4 y 5
     btn_refrescar_auditoria.click(fn=cargar_datos_auditoria, inputs=[], outputs=tabla_auditoria)
-
-    # Eventos Pestaña 5
     btn_respaldo.click(fn=generar_respaldo_manual, inputs=[], outputs=[archivo_respaldo, msg_respaldo])
     btn_restaurar.click(fn=restaurar_base_datos, inputs=[archivo_subir_respaldo], outputs=[msg_restaurar]).then(fn=cargar_todo_ui, inputs=[], outputs=[tabla_inventario, serie_asignar, custodio_asignar, serie_liberar, serie_editar, tabla_funcionarios, buscar_func_combo, buscar_usuario_combo, custodio_mantenimiento])
 
@@ -1378,5 +1469,5 @@ app = gr.mount_gradio_app(app, erp_interfaz, path="/", auth=verificar_credencial
 
 if __name__ == "__main__":
     import uvicorn
-    # Cambiamos el puerto local a 8000 para evitar el choque con el proceso "fantasma"
+    # Se ajustó el puerto a 8000 para uso local sin choques
     uvicorn.run(app, host="0.0.0.0", port=8000)
