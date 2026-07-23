@@ -12,13 +12,11 @@ from pypdf import PdfReader
 from dotenv import load_dotenv
 import concurrent.futures
 
-# --- CONFIGURACIÓN DE SUPABASE Y GEMINI PARA LA NUBE ---
 from supabase import create_client, Client, ClientOptions
 from google import genai
 
 load_dotenv()
 
-# El .strip() asegura que el servidor ignore espacios en blanco accidentales en tus claves
 supabase_url = os.environ.get("SUPABASE_URL", "").strip()
 supabase_key = os.environ.get("SUPABASE_KEY", "").strip()
 gemini_key = os.environ.get("GEMINI_API_KEY", "").strip()
@@ -39,9 +37,7 @@ except Exception as e:
     print(f"⚠️ ADVERTENCIA: Error configurando Gemini: {e}")
     gemini_client = None
 
-# --- 1.1 MOTOR DE IA CON REINTENTOS AUTOMÁTICOS ---
 def llamar_gemini_con_reintentos(prompt, max_reintentos=4):
-    """Maneja errores 503 (Servidor saturado) o 429 reintentando automáticamente."""
     for intento in range(max_reintentos):
         try:
             return gemini_client.models.generate_content(model='gemini-2.5-flash', contents=prompt)
@@ -49,17 +45,14 @@ def llamar_gemini_con_reintentos(prompt, max_reintentos=4):
             error_str = str(e)
             if '503' in error_str or '429' in error_str or 'UNAVAILABLE' in error_str:
                 if intento < max_reintentos - 1:
-                    tiempo_espera = 2 ** intento  # Espera 1s, 2s, 4s...
-                    print(f"⚠️ Servidor IA saturado (503). Reintentando en {tiempo_espera}s... (Intento {intento + 1}/{max_reintentos})")
+                    tiempo_espera = 2 ** intento
                     time.sleep(tiempo_espera)
                 else:
                     raise Exception("Los servidores de IA de Google están experimentando demasiada demanda. Por favor, intenta de nuevo en un par de minutos.")
             else:
                 raise e
 
-# --- MOTOR RESPALDO Y RESTAURACIÓN AUTOMÁTICO ---
 def obtener_todos_los_registros(tabla):
-    """Extrae todos los registros de una tabla en Supabase manejando la paginación."""
     datos = []
     rango_inicio = 0
     rango_fin = 999
@@ -75,7 +68,6 @@ def obtener_todos_los_registros(tabla):
     return datos
 
 def respaldar_base_datos():
-    """Descarga toda la BD y la guarda en un archivo JSON."""
     tablas = ["usuarios_sistema", "auditoria_sistema", "equipos", "funcionarios", "ordenes_compra", "mantenimientos"]
     carpeta_respaldos = os.path.join(tempfile.gettempdir(), "respaldos")
     os.makedirs(carpeta_respaldos, exist_ok=True)
@@ -90,10 +82,8 @@ def respaldar_base_datos():
             
         with open(ruta_archivo, "w", encoding="utf-8") as f:
             json.dump(datos_completos, f, indent=4, ensure_ascii=False)
-        print(f"✅ Respaldo automático creado: {ruta_archivo}")
         return ruta_archivo
     except Exception as e:
-        print(f"❌ Error en respaldo: {e}")
         return None
 
 def generar_respaldo_manual(request: gr.Request):
@@ -125,12 +115,11 @@ def restaurar_base_datos(archivo_json, request: gr.Request):
                     supabase.table(tabla).upsert(bloque).execute()
                     total_restaurados += len(bloque)
                     
-        registrar_auditoria(usuario, f"Restauró la base de datos desde archivo de respaldo ({total_restaurados} registros procesados).")
+        registrar_auditoria(usuario, f"Restauró la base de datos desde archivo de respaldo ({total_restaurados} registros).")
         return f"✅ Base de datos restaurada con éxito. Se procesaron {total_restaurados} registros."
     except Exception as e:
         return f"❌ Error al restaurar la base de datos: {e}"
 
-# --- 2. SEGURIDAD Y AUDITORÍA ---
 def verificar_credenciales(usuario, clave):
     try:
         res = supabase.table("usuarios_sistema").select("*").eq("usuario", usuario).eq("clave", clave).execute()
@@ -139,7 +128,7 @@ def verificar_credenciales(usuario, clave):
 
 def registrar_auditoria(usuario, accion):
     try: supabase.table("auditoria_sistema").insert({"usuario": usuario, "accion": accion}).execute()
-    except Exception as e: print(f"Fallo al registrar auditoría: {e}")
+    except Exception: pass
 
 def cargar_datos_auditoria():
     try:
@@ -184,9 +173,7 @@ def gestionar_usuario_admin(usuario_db, nueva_clave, rol_db, request: gr.Request
         return msg, cargar_usuarios_sistema(), obtener_usuarios_lista()
     except Exception as e: return f"❌ Error: {e}", cargar_usuarios_sistema(), obtener_usuarios_lista()
 
-# --- 3. INVENTARIO Y PERSONAL ---
-def analizar_fase_precontractual(archivos_principales, archivos_referencia, fuentes_texto, request: gr.Request):
-    usuario = request.username if request else "Sistema"
+def analizar_fase_precontractual(archivos_principales, archivos_referencia, enlaces_input):
     if not archivos_principales: return "⚠️ Error: Anexa documentos."
     texto_contexto = "=== DOCUMENTOS PRINCIPALES ===\n"
     for archivo in archivos_principales:
@@ -198,13 +185,12 @@ def analizar_fase_precontractual(archivos_principales, archivos_referencia, fuen
             reader = PdfReader(archivo)
             for pagina in reader.pages: texto_contexto += pagina.extract_text() + "\n"
     try:
-        prompt = f"Audita la fase precontractual (LOSNCP).\nCONTEXTO: {texto_contexto}\nENLACES: {fuentes_texto}"
+        prompt = f"Audita la fase precontractual (LOSNCP).\nCONTEXTO: {texto_contexto}\nENLACES: {enlaces_input}"
         respuesta = llamar_gemini_con_reintentos(prompt)
-        registrar_auditoria(usuario, "Ejecutó un análisis precontractual.")
         return respuesta.text
     except Exception as e: return f"❌ Error de IA: {e}"
 
-def cargar_datos_inventario(termino_busqueda="", as_styled=True):
+def cargar_datos_inventario(termino_busqueda=""):
     try:
         respuesta = supabase.table("equipos").select(
             "id, tipo_equipo, marca, modelo, numero_serie, estado, observaciones, funcionarios(nombres_completos, departamento), ordenes_compra(numero_proceso_sercop, numero_orden_compra, razon_social_proveedor, nombre_comercial)"
@@ -221,59 +207,26 @@ def cargar_datos_inventario(termino_busqueda="", as_styled=True):
             if isinstance(func, list) and func: func = func[0]
             elif not isinstance(func, dict): func = {}
             
-            if func:
-                funcionario = func.get("nombres_completos") or "Sin Asignar"
-                departamento = func.get("departamento") or "-"
-            else:
-                funcionario = "Sin Asignar"
-                departamento = "-"
+            custodio = func.get("nombres_completos") if func else "Sin Asignar"
+            departamento = func.get("departamento") if func else "-"
                 
             ord_data = item.get("ordenes_compra")
             if isinstance(ord_data, list) and ord_data: ord_data = ord_data[0]
             elif not isinstance(ord_data, dict): ord_data = {}
             
-            if ord_data:
-                num_ce = ord_data.get("numero_orden_compra", "Sin CE")
-                num_proceso = ord_data.get("numero_proceso_sercop", "Sin Proceso")
-                proveedor = ord_data.get("razon_social_proveedor", "No registrado")
-                nombre_comercial = ord_data.get("nombre_comercial", "") or ""
-            else:
-                num_ce = "Sin Orden"
-                num_proceso = "-"
-                proveedor = "-"
-                nombre_comercial = "-"
+            num_ce = ord_data.get("numero_orden_compra", "Sin CE") if ord_data else "Sin Orden"
+            num_proceso = ord_data.get("numero_proceso_sercop", "-") if ord_data else "-"
+            proveedor = ord_data.get("razon_social_proveedor", "No registrado") if ord_data else "-"
+            nombre_comercial = ord_data.get("nombre_comercial", "") if ord_data else "-"
             
-            fila = [equipo, marca_modelo, serie, funcionario, departamento, estado, num_ce, num_proceso, proveedor, nombre_comercial, observaciones]
-            if termino_busqueda:
-                termino = termino_busqueda.lower()
-                fila_str = " ".join([str(x) for x in fila]).lower()
-                if termino not in fila_str:
-                    continue
+            fila = [equipo, marca_modelo, serie, custodio, departamento, estado, num_ce, num_proceso, proveedor, nombre_comercial, observaciones]
+            if termino_busqueda and termino_busqueda.lower() not in " ".join([str(x) for x in fila]).lower():
+                continue
             datos.append(fila)
             
-        if not datos:
-            datos = [["-", "-", "Sin resultados", "-", "-", "-", "-", "-", "-", "-", "-"]]
-            
-        if not as_styled:
-            return datos
-            
-        columnas = ["Equipo", "Marca/Modelo", "Nº Serie", "Custodio Asignado", "Área/Dirección", "Estado", "Orden de Compra", "Proceso SERCOP", "Proveedor", "Nombre Comercial", "Observaciones"]
-        df = pd.DataFrame(datos, columns=columnas)
-        
-        def colorear_filas(row):
-            if row["Estado"] in ["De Baja", "Dañado", "Eliminado"]:
-                return ['background-color: #ffcdd2; color: #b71c1c'] * len(row)
-            elif row["Custodio Asignado"] in ["Sin Asignar", "Sin Asignar - BODEGA"] and row["Equipo"] != "-":
-                return ['background-color: #ffe0b2; color: #e65100'] * len(row)
-            return [''] * len(row)
-            
-        return df.style.apply(colorear_filas, axis=1)
-        
+        return datos if datos else [["-", "-", "Sin resultados", "-", "-", "-", "-", "-", "-", "-", "-"]]
     except Exception as e:
-        datos_error = [["Error", "de", "conexión", "-", "-", "-", "-", "-", "-", "-", str(e)]]
-        if not as_styled: return datos_error
-        df_error = pd.DataFrame(datos_error, columns=["Equipo", "Marca/Modelo", "Nº Serie", "Custodio Asignado", "Área/Dirección", "Estado", "Orden de Compra", "Proceso SERCOP", "Proveedor", "Nombre Comercial", "Observaciones"])
-        return df_error
+        return [["Error", "de", "conexión", "-", "-", "-", "-", "-", "-", "-", str(e)]]
 
 def cargar_listado_funcionarios():
     try:
@@ -284,8 +237,8 @@ def cargar_listado_funcionarios():
 
 def obtener_series_disponibles():
     try:
-        res = supabase.table("equipos").select("numero_serie, tipo_equipo, marca, funcionario_id").execute()
-        series = [f"{item['numero_serie']} - {item.get('tipo_equipo', '')} {item.get('marca', '')}" for item in res.data if item.get("funcionario_id") is None]
+        res = supabase.table("equipos").select("numero_serie, tipo_equipo, marca").is_("funcionario_id", "null").execute()
+        series = [f"{item['numero_serie']} - {item.get('tipo_equipo', '')} {item.get('marca', '')}" for item in res.data]
         return gr.update(choices=series, value=None)
     except Exception: return gr.update(choices=[], value=None)
 
@@ -298,15 +251,14 @@ def obtener_todas_las_series():
 
 def obtener_series_asignadas():
     try:
-        res = supabase.table("equipos").select("numero_serie, tipo_equipo, funcionario_id, funcionarios(nombres_completos)").execute()
+        res = supabase.table("equipos").select("numero_serie, tipo_equipo, funcionario_id, funcionarios(nombres_completos)").not_("funcionario_id", "is", "null").execute()
         series = []
         for item in res.data:
-            if item.get("funcionario_id") is not None:
-                func = item.get("funcionarios")
-                if isinstance(func, list) and func: func = func[0]
-                elif not isinstance(func, dict): func = {}
-                nombre = func.get("nombres_completos", "Desconocido") if func else "Desconocido"
-                series.append(f"{item['numero_serie']} - {item.get('tipo_equipo', '')} ({nombre})")
+            func = item.get("funcionarios")
+            if isinstance(func, list) and func: func = func[0]
+            elif not isinstance(func, dict): func = {}
+            nombre = func.get("nombres_completos", "Desconocido") if func else "Desconocido"
+            series.append(f"{item['numero_serie']} - {item.get('tipo_equipo', '')} ({nombre})")
         return gr.update(choices=series, value=None)
     except Exception: return gr.update(choices=[], value=None)
 
@@ -318,9 +270,8 @@ def obtener_funcionarios():
     except Exception: return gr.update(choices=[], value=None)
 
 def realizar_busqueda(termino): 
-    return cargar_datos_inventario(termino, as_styled=True)
+    return cargar_datos_inventario(termino)
 
-# --- 3.1 FUNCIONES DE MANTENIMIENTO PROTEGIDAS ---
 def obtener_funcionarios_mantenimiento():
     try:
         res = supabase.table("funcionarios").select("cedula, nombres_completos").execute()
@@ -331,1461 +282,752 @@ def obtener_funcionarios_mantenimiento():
 
 def cargar_equipos_de_funcionario(funcionario_combo):
     try:
-        if not funcionario_combo:
-            return gr.update(choices=[], value=[]), ""
-        
+        if not funcionario_combo: return gr.update(choices=[], value=[]), ""
         combo_str = str(funcionario_combo).strip()
         if combo_str == "Sin Asignar - BODEGA":
             res_eq = supabase.table("equipos").select("numero_serie, tipo_equipo, marca").is_("funcionario_id", "null").execute()
             equipos = [f"{eq['numero_serie']} - {eq.get('tipo_equipo','')} {eq.get('marca','')}" for eq in res_eq.data]
             return gr.update(choices=equipos, value=[]), "Administrador de Bodega"
 
-        partes = combo_str.split(" - ")
-        cedula = partes[-1].strip() if len(partes) > 1 else combo_str
-        
+        cedula = combo_str.split(" - ")[-1].strip()
         res_func = supabase.table("funcionarios").select("id, nombres_completos").eq("cedula", cedula).execute()
-        if not res_func.data:
-            return gr.update(choices=[], value=[]), ""
+        if not res_func.data: return gr.update(choices=[], value=[]), ""
         
         func_id = res_func.data[0]['id']
         nombre_func = res_func.data[0]['nombres_completos']
-
         res_eq = supabase.table("equipos").select("numero_serie, tipo_equipo, marca").eq("funcionario_id", func_id).execute()
         equipos = [f"{eq['numero_serie']} - {eq.get('tipo_equipo','')} {eq.get('marca','')}" for eq in res_eq.data]
-
         return gr.update(choices=equipos, value=[]), nombre_func
-    except Exception as e:
-        print(f"Error en cargar_equipos_de_funcionario: {e}")
-        return gr.update(choices=[], value=[]), ""
+    except Exception: return gr.update(choices=[], value=[]), ""
 
 def obtener_series_de_funcionario(funcionario_combo):
     try:
-        if not funcionario_combo:
-            return []
+        if not funcionario_combo: return []
         combo_str = str(funcionario_combo).strip()
         if combo_str == "Sin Asignar - BODEGA":
-            res_eq = supabase.table("equipos").select("numero_serie").is_("funcionario_id", "null").execute()
-            return [eq.get("numero_serie") for eq in res_eq.data if eq.get("numero_serie")]
+            return [eq.get("numero_serie") for eq in supabase.table("equipos").select("numero_serie").is_("funcionario_id", "null").execute().data if eq.get("numero_serie")]
             
-        partes = combo_str.split(" - ")
-        cedula = partes[-1].strip() if len(partes) > 1 else combo_str
-        
+        cedula = combo_str.split(" - ")[-1].strip()
         res_func = supabase.table("funcionarios").select("id").eq("cedula", cedula).execute()
-        if not res_func.data:
-            return []
-        func_id = res_func.data[0]['id']
-        res_eq = supabase.table("equipos").select("numero_serie").eq("funcionario_id", func_id).execute()
-        return [eq.get("numero_serie") for eq in res_eq.data if eq.get("numero_serie")]
-    except Exception:
-        return []
-
-def cargar_historial_mantenimientos(serie_combo):
-    try:
-        if not serie_combo: return [["-", "-", "-", "-", "-", "-", "-"]]
-
-        if isinstance(serie_combo, list):
-            if not serie_combo:
-                return [["-", "-", "-", "-", "-", "-", "-"]]
-            series_limpias = [str(s).split(" - ")[0].strip() for s in serie_combo]
-        else:
-            series_limpias = [str(serie_combo).split(" - ")[0].strip()]
-
-        return _historial_por_series(series_limpias)
-    except Exception:
-        return [["-", "-", "-", "-", "-", "-", "-"]]
+        if not res_func.data: return []
+        return [eq.get("numero_serie") for eq in supabase.table("equipos").select("numero_serie").eq("funcionario_id", res_func.data[0]['id']).execute().data if eq.get("numero_serie")]
+    except Exception: return []
 
 def cargar_historial_por_funcionario(funcionario_combo):
     try:
-        if not funcionario_combo:
-            return [["-", "-", "-", "-", "-", "-", "-"]]
-
-        series_limpias = obtener_series_de_funcionario(funcionario_combo)
-        if not series_limpias:
-            return [["-", "Este funcionario no tiene equipos asignados", "-", "-", "-", "-", "-"]]
-
-        return _historial_por_series(series_limpias)
-    except Exception:
-        return [["-", "-", "-", "-", "-", "-", "-"]]
-
-def _historial_por_series(series_limpias):
-    try:
-        res = supabase.table("mantenimientos").select("*").in_("numero_serie", series_limpias).order("id", desc=True).execute()
+        if not funcionario_combo: return [["-", "-", "-", "-", "-", "-", "-"]]
+        series = obtener_series_de_funcionario(funcionario_combo)
+        if not series: return [["-", "Este funcionario no tiene equipos", "-", "-", "-", "-", "-"]]
+        
+        res = supabase.table("mantenimientos").select("*").in_("numero_serie", series).order("id", desc=True).execute()
         datos = []
         for item in res.data:
-            numero_informe = item.get("numero_informe")
-            equipos_str = item.get("numero_serie", "")
-
-            if numero_informe:
-                try:
-                    res_grupo = supabase.table("mantenimientos").select("numero_serie").eq("numero_informe", numero_informe).execute()
-                    series_grupo = [g.get("numero_serie", "") for g in res_grupo.data if g.get("numero_serie")]
-                    if series_grupo:
-                        equipos_str = ", ".join(sorted(set(series_grupo)))
-                except Exception:
-                    pass
-
-            datos.append([
-                item.get("fecha", ""),
-                item.get("tipo_mantenimiento", ""),
-                item.get("tecnico_proveedor", ""),
-                equipos_str,
-                item.get("descripcion", ""),
-                f"${item.get('costo', 0.0)}",
-                item.get("proximo_mantenimiento", "")
-            ])
+            num = item.get("numero_informe")
+            eq_str = item.get("numero_serie", "")
+            if num:
+                sg = [g.get("numero_serie", "") for g in supabase.table("mantenimientos").select("numero_serie").eq("numero_informe", num).execute().data if g.get("numero_serie")]
+                if sg: eq_str = ", ".join(sorted(set(sg)))
+            datos.append([item.get("fecha", ""), item.get("tipo_mantenimiento", ""), item.get("tecnico_proveedor", ""), eq_str, item.get("descripcion", ""), f"${item.get('costo', 0.0)}", item.get("proximo_mantenimiento", "")])
         return datos if datos else [["-", "Sin historial de mantenimientos", "-", "-", "-", "-", "-"]]
     except Exception as e: return [["Error", str(e), "-", "-", "-", "-", "-"]]
 
-def cargar_historial_completo():
-    try:
-        res = supabase.table("mantenimientos").select("*").order("id", desc=True).execute()
-        datos = []
-        vistos = set() 
-        for item in res.data:
-            numero_informe = item.get("numero_informe")
-            if numero_informe and numero_informe in vistos:
-                continue
-            if numero_informe:
-                vistos.add(numero_informe)
-            equipos_str = item.get("numero_serie", "")
-            if numero_informe:
-                try:
-                    res_grupo = supabase.table("mantenimientos").select("numero_serie").eq("numero_informe", numero_informe).execute()
-                    series_grupo = [g.get("numero_serie", "") for g in res_grupo.data if g.get("numero_serie")]
-                    if series_grupo:
-                        equipos_str = ", ".join(sorted(set(series_grupo)))
-                except:
-                    pass
-            datos.append([
-                item.get("fecha", ""),
-                item.get("tipo_mantenimiento", ""),
-                item.get("tecnico_proveedor", ""),
-                equipos_str,
-                item.get("descripcion", ""),
-                f"${item.get('costo', 0.0)}",
-                item.get("proximo_mantenimiento", "")
-            ])
-        return datos if datos else [["-", "No hay mantenimientos en el sistema", "-", "-", "-", "-", "-"]]
-    except Exception as e:
-        return [["Error", str(e), "-", "-", "-", "-", "-"]]
-
-def obtener_mantenimientos_lista(serie_combo):
-    try:
-        if not serie_combo:
-            return gr.update(choices=[], value=None)
-        serie_limpia = str(serie_combo).split(" - ")[0].strip()
-        return _mantenimientos_lista_por_series([serie_limpia])
-    except Exception:
-        return gr.update(choices=[], value=None)
-
 def obtener_mantenimientos_lista_por_funcionario(funcionario_combo):
     try:
-        if not funcionario_combo:
-            return gr.update(choices=[], value=None)
-        series_limpias = obtener_series_de_funcionario(funcionario_combo)
-        if not series_limpias:
-            return gr.update(choices=[], value=None)
-        return _mantenimientos_lista_por_series(series_limpias)
-    except Exception:
-        return gr.update(choices=[], value=None)
-
-def _mantenimientos_lista_por_series(series_limpias):
-    try:
-        res = supabase.table("mantenimientos").select("id, fecha, tipo_mantenimiento, numero_informe, numero_serie").in_("numero_serie", series_limpias).order("id", desc=True).execute()
-        opciones = []
-        vistos = set()
+        if not funcionario_combo: return gr.update(choices=[], value=None)
+        series = obtener_series_de_funcionario(funcionario_combo)
+        if not series: return gr.update(choices=[], value=None)
+        
+        res = supabase.table("mantenimientos").select("id, fecha, tipo_mantenimiento, numero_informe").in_("numero_serie", series).order("id", desc=True).execute()
+        opciones, vistos = [], set()
         for item in res.data:
             num = item.get("numero_informe") or f"ID-{item['id']}"
-            if num in vistos:
-                continue
+            if num in vistos: continue
             vistos.add(num)
-            fecha = item.get("fecha", "")
-            tipo = item.get("tipo_mantenimiento", "")
-            opciones.append(f"{num} | {fecha} | {tipo} | id:{item['id']}")
+            opciones.append(f"{num} | {item.get('fecha', '')} | {item.get('tipo_mantenimiento', '')} | id:{item['id']}")
         return gr.update(choices=opciones, value=None)
-    except Exception:
-        return gr.update(choices=[], value=None)
-
-def descargar_reporte_mantenimiento(seleccion):
-    if not seleccion:
-        return gr.update(visible=False, value=None), "⚠️ Selecciona un registro primero."
-    try:
-        numero_informe = seleccion.split(" | ")[0].strip()
-        res = supabase.table("mantenimientos").select("url_reporte_pdf").eq("numero_informe", numero_informe).limit(1).execute()
-        if not res.data or not res.data[0].get("url_reporte_pdf"):
-            return gr.update(visible=False, value=None), f"⚠️ El registro '{numero_informe}' no tiene un reporte PDF guardado."
-
-        ruta_storage = res.data[0]["url_reporte_pdf"]
-        contenido = supabase.storage.from_("reportes-mantenimiento").download(ruta_storage)
-
-        temp_dir = tempfile.gettempdir()
-        ruta_local = os.path.join(temp_dir, f"Reporte_{numero_informe}.pdf")
-        with open(ruta_local, "wb") as f:
-            f.write(contenido)
-
-        return gr.update(value=ruta_local, visible=True), f"✅ Reporte {numero_informe} listo para descargar."
-    except Exception as e:
-        return gr.update(visible=False, value=None), f"❌ Error al descargar el reporte: {e}"
-
-def eliminar_mantenimiento(seleccion, request: gr.Request):
-    usuario = request.username if request else "Sistema"
-    if not seleccion:
-        return "⚠️ Selecciona un registro para eliminar."
-    try:
-        numero_informe = seleccion.split(" | ")[0].strip()
-        id_referencia = int(seleccion.split("id:")[-1])
-
-        if numero_informe and not numero_informe.startswith("ID-"):
-            res_grupo = supabase.table("mantenimientos").select("id, url_reporte_pdf").eq("numero_informe", numero_informe).execute()
-        else:
-            res_grupo = supabase.table("mantenimientos").select("id, url_reporte_pdf").eq("id", id_referencia).execute()
-
-        ids_a_borrar = [r["id"] for r in res_grupo.data]
-        ruta_pdf_storage = next((r.get("url_reporte_pdf") for r in res_grupo.data if r.get("url_reporte_pdf")), None)
-
-        if not ids_a_borrar:
-            ids_a_borrar = [id_referencia]
-
-        for id_reg in ids_a_borrar:
-            supabase.table("mantenimientos").delete().eq("id", id_reg).execute()
-
-        if ruta_pdf_storage:
-            try:
-                supabase.storage.from_("reportes-mantenimiento").remove([ruta_pdf_storage])
-            except Exception:
-                pass
-
-        registrar_auditoria(usuario, f"Eliminó registro(s) de mantenimiento. Reporte: {numero_informe}.")
-        return f"🗑️ Reporte '{numero_informe}' eliminado correctamente ({len(ids_a_borrar)} equipo(s) afectado(s))."
-    except Exception as e:
-        return f"❌ Error al eliminar: {e}"
+    except Exception: return gr.update(choices=[], value=None)
 
 def auto_completar_mantenimiento(serie_combo):
     try:
-        if not serie_combo:
-            return gr.update(choices=[], value=None), gr.update()
-        
-        if isinstance(serie_combo, list):
-            if not serie_combo:
-                return gr.update(choices=[], value=None), gr.update()
-            serie_ref = serie_combo[-1] 
-        else:
-            serie_ref = serie_combo
-
+        if not serie_combo: return gr.update(choices=[], value=None)
+        serie_ref = serie_combo[-1] if isinstance(serie_combo, list) and serie_combo else serie_combo
         serie_limpia = str(serie_ref).split(" - ")[0].strip()
-        historial = cargar_historial_mantenimientos(serie_combo)
-        res = supabase.table("equipos").select("orden_id").ilike("numero_serie", f"{serie_limpia}%").execute()
         
+        res = supabase.table("equipos").select("orden_id").ilike("numero_serie", f"{serie_limpia}%").execute()
         proveedor = ""
         if res.data and res.data[0].get("orden_id"):
             res_ord = supabase.table("ordenes_compra").select("razon_social_proveedor").eq("id", res.data[0]["orden_id"]).execute()
-            if res_ord.data:
-                proveedor = res_ord.data[0].get("razon_social_proveedor", "")
-
-        return gr.update(choices=[proveedor] if proveedor else [], value=proveedor), gr.update(value=historial)
-
-    except Exception as e:
-        return gr.update(choices=[], value=None), gr.update()
+            if res_ord.data: proveedor = res_ord.data[0].get("razon_social_proveedor", "")
+        return gr.update(choices=[proveedor] if proveedor else [], value=proveedor)
+    except Exception: return gr.update(choices=[], value=None)
 
 def obtener_numero_reporte(proveedor):
-    if not proveedor or str(proveedor).strip() == "" or str(proveedor).lower() == "mantenimiento interno":
-        prefix = "INT"
+    if not proveedor or str(proveedor).strip() == "" or str(proveedor).lower() == "mantenimiento interno": prefix = "INT"
     else:
         cleaned = re.sub(r'[^a-zA-Z0-9]', '', str(proveedor))
         prefix = cleaned[:3].upper() if len(cleaned) >= 3 else cleaned.upper().ljust(3, 'X')
     
-    for intento in range(3):
-        try:
-            res = supabase.table("mantenimientos").select("numero_informe").like("numero_informe", f"MNT-{prefix}-%").execute()
-            max_num = 0
-            for item in res.data:
-                num_str = item.get("numero_informe", "")
-                if num_str:
-                    partes = num_str.split("-")
-                    if len(partes) >= 3:
-                        try:
-                            num = int(partes[-1])
-                            if num > max_num:
-                                max_num = num
-                        except ValueError:
-                            pass
-            siguiente = max_num + 1
-            return f"MNT-{prefix}-{str(siguiente).zfill(4)}"
-        except Exception as e:
-            if intento < 2:
-                time.sleep(1)
-            else:
-                raise Exception(f"Falla de red ({e})")
+    res = supabase.table("mantenimientos").select("numero_informe").like("numero_informe", f"MNT-{prefix}-%").execute()
+    max_num = 0
+    for item in res.data:
+        num_str = item.get("numero_informe", "")
+        if num_str:
+            partes = num_str.split("-")
+            if len(partes) >= 3:
+                try:
+                    num = int(partes[-1])
+                    if num > max_num: max_num = num
+                except ValueError: pass
+    return f"MNT-{prefix}-{str(max_num + 1).zfill(4)}"
 
-def registrar_y_generar_acta(funcionario_combo, serie_combo, fecha, tipo, checks, desc_extra, tecnico, costo, proximo,
-                             fotos_paths, nombre_admin, nombre_tecnico_firma, nombre_funcionario_firma, request: gr.Request):
+def registrar_y_generar_acta(funcionario_combo, serie_combo, fecha, tipo, checks, desc_extra, tecnico, costo, proximo, fotos_paths, foto_camara, nombre_admin, nombre_tecnico, nombre_func, request: gr.Request):
     usuario = request.username if request else "Sistema"
-    if not funcionario_combo or not serie_combo or not fecha or not tipo:
-        return "⚠️ El Funcionario, Serie, Fecha y Tipo son obligatorios.", [["-", "-", "-", "-", "-", "-", "-"]], gr.update(visible=False, value=None)
+    if not funcionario_combo or not serie_combo or not fecha or not tipo: return "⚠️ Faltan datos.", [["-", "-", "-", "-", "-", "-", "-"]], gr.update(visible=False, value=None)
 
-    try: nombre_custodio = str(funcionario_combo).split(" - ")[0].strip()
-    except Exception: nombre_custodio = "Sin Asignar"
+    # Lógica combinada para manejar fotos de archivo normal y fotos de la cámara web/celular
+    if foto_camara:
+        if fotos_paths is None:
+            fotos_paths = []
+        elif not isinstance(fotos_paths, list):
+            fotos_paths = [fotos_paths]
+        fotos_paths.append(foto_camara)
 
+    nombre_custodio = str(funcionario_combo).split(" - ")[0].strip() if funcionario_combo else "Sin Asignar"
     trabajos = ", ".join(checks) if checks else ""
     desc_final = f"{trabajos}. {desc_extra}".strip(" .")
 
-    def limpiar_texto(texto):
-        if not texto: return ""
-        texto = str(texto)
-        reemplazos = {
-            '●': '-', '•': '-', '·': '-', '◦': '-', '→': '->', '←': '<-', '✓': 'OK', '✗': 'X',
-            '\u2019': "'", '\u2018': "'", '\u201c': '"', '\u201d': '"', '\u2013': '-', '\u2014': '--', '\u2026': '...',
-        }
-        for orig, reemplazo in reemplazos.items(): texto = texto.replace(orig, reemplazo)
-        return texto.encode('latin-1', errors='replace').decode('latin-1')
-
-    mensajes = []
-    
-    try: numero_reporte = obtener_numero_reporte(tecnico)
-    except Exception as error_red: return f"❌ INTERNET DESCONECTADO: No se pudo verificar la numeración en la BD. Revisa tu red.\nDetalle: {error_red}", gr.update(), gr.update(visible=False, value=None)
-
-    series_limpias = []
-    equipos_nombres = []
-    ordenes_compra_encontradas = set()
+    mensajes, equipos_nombres, ordenes_encontradas = [], [], set()
+    numero_reporte = obtener_numero_reporte(tecnico)
 
     for s in serie_combo:
         serie_limpia = str(s).split(" - ")[0].strip()
-        series_limpias.append(serie_limpia)
         equipos_nombres.append(s)
-
         try:
-            res_eq_orden = supabase.table("equipos").select("orden_id, ordenes_compra(numero_orden_compra, numero_proceso_sercop)").ilike("numero_serie", f"{serie_limpia}%").execute()
-            ord_info = None
-            if res_eq_orden.data:
-                ord_raw = res_eq_orden.data[0].get("ordenes_compra")
-                if isinstance(ord_raw, list) and ord_raw: ord_info = ord_raw[0]
-                elif isinstance(ord_raw, dict): ord_info = ord_raw
-
-            if ord_info:
-                num_orden = ord_info.get("numero_orden_compra") or ord_info.get("numero_proceso_sercop")
-                if num_orden:
-                    num_orden_normalizado = str(num_orden).strip()
-                    if num_orden_normalizado: ordenes_compra_encontradas.add(num_orden_normalizado)
+            res_eq = supabase.table("equipos").select("orden_id, ordenes_compra(numero_orden_compra, numero_proceso_sercop)").ilike("numero_serie", f"{serie_limpia}%").execute()
+            if res_eq.data:
+                ord_data = res_eq.data[0].get("ordenes_compra")
+                if isinstance(ord_data, list) and ord_data: ord_data = ord_data[0]
+                elif not isinstance(ord_data, dict): ord_data = {}
+                if ord_data:
+                    num_ord = ord_data.get("numero_orden_compra") or ord_data.get("numero_proceso_sercop")
+                    if num_ord: ordenes_encontradas.add(str(num_ord).strip())
         except Exception: pass
 
         try:
-            datos_mant = {
+            supabase.table("mantenimientos").insert({
                 "numero_serie": serie_limpia, "fecha": fecha, "tipo_mantenimiento": tipo, "descripcion": desc_final,
-                "tecnico_proveedor": tecnico, "costo": float(costo) if costo else 0.0,
-                "proximo_mantenimiento": proximo if proximo else None, "numero_informe": numero_reporte
-            }
-            supabase.table("mantenimientos").insert(datos_mant).execute()
-            registrar_auditoria(usuario, f"Registró mantenimiento {tipo} al equipo {serie_limpia}. Reporte: {numero_reporte}")
-
-            if tipo == "De Baja":
-                supabase.table("equipos").update({"estado": "De Baja"}).ilike("numero_serie", f"{serie_limpia}%").execute()
+                "tecnico_proveedor": tecnico, "costo": float(costo) if costo else 0.0, "proximo_mantenimiento": proximo if proximo else None, "numero_informe": numero_reporte
+            }).execute()
+            if tipo == "De Baja": supabase.table("equipos").update({"estado": "De Baja"}).ilike("numero_serie", f"{serie_limpia}%").execute()
             mensajes.append(f"✅ Registrado: {serie_limpia}")
-        except Exception as e:
-            mensajes.append(f"❌ Error en {serie_limpia}: {e}")
+        except Exception as e: mensajes.append(f"❌ Error en {serie_limpia}: {e}")
 
-    ordenes_finales = []
-    vistos_orden = set()
-    for orden in sorted(ordenes_compra_encontradas):
-        for parte in orden.split(","):
-            parte_limpia = parte.strip()
-            if parte_limpia and parte_limpia not in vistos_orden:
-                vistos_orden.add(parte_limpia)
-                ordenes_finales.append(parte_limpia)
-    texto_orden_compra = ", ".join(ordenes_finales) if ordenes_finales else "No registrada"
-
-    ruta_pdf = None
+    registrar_auditoria(usuario, f"Registró mantenimiento {numero_reporte}.")
     
+    ruta_pdf = None
     if tipo in ["Preventivo", "Correctivo", "Revisión de Garantía", "De Baja", "Diagnóstico"]:
         try:
             pdf = FPDF()
             pdf.set_auto_page_break(auto=True, margin=20)
             pdf.add_page()
-            pdf.set_fill_color(44, 62, 80)
-            pdf.rect(0, 0, 210, 28, 'F')
-            pdf.set_text_color(255, 255, 255)
-            pdf.set_font("Arial", 'B', 16)
-            pdf.set_xy(10, 8)
-            pdf.cell(0, 10, limpiar_texto("REPORTE DE MANTENIMIENTO"), ln=True, align='C')
-            pdf.set_font("Arial", '', 9)
-            pdf.set_xy(10, 19)
-            pdf.cell(0, 6, limpiar_texto(f"N. Reporte: {numero_reporte}"), ln=True, align='C')
-            pdf.set_text_color(0, 0, 0)
-            pdf.ln(8)
+            
+            def l(t): return str(t).replace('●','-').encode('latin-1', 'replace').decode('latin-1')
+            
+            pdf.set_fill_color(44, 62, 80); pdf.rect(0, 0, 210, 28, 'F'); pdf.set_text_color(255, 255, 255)
+            pdf.set_font("Arial", 'B', 16); pdf.set_xy(10, 8); pdf.cell(0, 10, "REPORTE DE MANTENIMIENTO", ln=True, align='C')
+            pdf.set_font("Arial", '', 9); pdf.set_xy(10, 19); pdf.cell(0, 6, f"N. Reporte: {numero_reporte}", ln=True, align='C')
+            pdf.set_text_color(0, 0, 0); pdf.ln(8)
 
-            pdf.set_font("Arial", 'B', 11)
-            pdf.set_fill_color(220, 230, 241)
-            pdf.cell(0, 8, "DATOS GENERALES", ln=True, fill=True)
-            pdf.ln(2)
+            pdf.set_font("Arial", 'B', 11); pdf.set_fill_color(220, 230, 241); pdf.cell(0, 8, "DATOS GENERALES", ln=True, fill=True); pdf.ln(2)
+            campos = [("Fecha de intervencion:", l(fecha)), ("Tipo de Mantenimiento:", l(tipo)), ("Empresa / Tecnico:", l(tecnico or "Interno")), ("Custodio a cargo:", l(nombre_custodio))]
+            for et, val in campos: pdf.set_font("Arial", 'B', 10); pdf.cell(65, 7, et, 0, 0); pdf.set_font("Arial", '', 10); pdf.cell(0, 7, val, 0, 1)
 
-            campos = [
-                ("Fecha de intervencion:", limpiar_texto(fecha)), ("Tipo de Mantenimiento:", limpiar_texto(tipo)),
-                ("Empresa / Tecnico:", limpiar_texto(tecnico if tecnico else "Mantenimiento Interno")),
-                ("Custodio a cargo:", limpiar_texto(nombre_custodio))
-            ]
-            for etiqueta, valor in campos:
-                pdf.set_font("Arial", 'B', 10)
-                pdf.cell(65, 7, limpiar_texto(etiqueta), 0, 0)
-                pdf.set_font("Arial", '', 10)
-                pdf.cell(0, 7, valor, 0, 1)
+            pdf.ln(4); pdf.set_font("Arial", 'B', 11); pdf.set_fill_color(220, 230, 241); pdf.cell(0, 8, "EQUIPOS INTERVENIDOS", ln=True, fill=True); pdf.ln(2)
+            pdf.set_font("Arial", '', 10); 
+            for eq in equipos_nombres: pdf.cell(0, 6, l(f"- {eq}"), ln=True)
 
-            pdf.ln(4)
-            pdf.set_font("Arial", 'B', 11)
-            pdf.set_fill_color(220, 230, 241)
-            pdf.cell(0, 8, "EQUIPOS INTERVENIDOS", ln=True, fill=True)
-            pdf.ln(2)
-            pdf.set_font("Arial", '', 10)
-            for eq in equipos_nombres: pdf.cell(0, 6, limpiar_texto(f"- {eq}"), ln=True)
-            pdf.ln(4)
+            pdf.ln(4); pdf.set_font("Arial", 'B', 11); pdf.set_fill_color(220, 230, 241); pdf.cell(0, 8, "TRABAJOS Y CONCLUSIONES", ln=True, fill=True); pdf.ln(2)
+            pdf.set_font("Arial", '', 10); pdf.multi_cell(0, 6, l(desc_final))
 
-            pdf.set_font("Arial", 'B', 11)
-            pdf.set_fill_color(220, 230, 241)
-            pdf.cell(0, 8, "TRABAJOS REALIZADOS", ln=True, fill=True)
-            pdf.ln(2)
-            pdf.set_font("Arial", '', 10)
-            texto_trabajos = trabajos.strip(" .") if trabajos else "No se especificaron trabajos puntuales."
-            pdf.multi_cell(0, 6, limpiar_texto(texto_trabajos))
-            pdf.ln(4)
+            pdf.ln(20); pdf.set_font("Arial", 'B', 11); pdf.set_fill_color(220, 230, 241); pdf.cell(0, 8, "FIRMAS DE CONFORMIDAD", ln=True, fill=True); pdf.ln(12)
+            y = pdf.get_y(); anchos = 55; pos = [12, 78, 144]
+            noms = [l(nombre_admin or "Administrador"), l(nombre_func or "Funcionario"), l(nombre_tecnico or "Tecnico")]
+            roles = ["Administrador", "Funcionario", "Tecnico"]
+            for i, x in enumerate(pos):
+                pdf.line(x, y, x + anchos, y); pdf.set_xy(x, y + 2); pdf.set_font("Arial", 'B', 9); pdf.cell(anchos, 5, noms[i], 0, 2, 'C')
+                pdf.set_font("Arial", 'I', 8); pdf.set_x(x); pdf.cell(anchos, 4, roles[i], 0, 2, 'C')
 
-            if desc_extra and desc_extra.strip():
-                pdf.set_font("Arial", 'B', 11)
-                pdf.set_fill_color(220, 230, 241)
-                pdf.cell(0, 8, "CONCLUSIONES / RECOMENDACIONES", ln=True, fill=True)
-                pdf.ln(2)
-                pdf.set_font("Arial", '', 10)
-                pdf.multi_cell(0, 6, limpiar_texto(desc_extra.strip()))
-                pdf.ln(4)
-
-            lista_fotos = []
-            if fotos_paths:
-                if isinstance(fotos_paths, list): lista_fotos = [f for f in fotos_paths if f]
-                elif isinstance(fotos_paths, str) and fotos_paths: lista_fotos = [fotos_paths]
-
-            if lista_fotos:
-                pdf.set_font("Arial", 'B', 11)
-                pdf.set_fill_color(220, 230, 241)
-                pdf.cell(0, 8, "EVIDENCIA FOTOGRAFICA", ln=True, fill=True)
-                pdf.ln(2)
-
-                ancho_foto = 88
-                margen_izq = 10
-                espacio_entre = 5
-                margen_inferior = 20
-                alto_pagina = 297  
-                x_inicio = [margen_izq, margen_izq + ancho_foto + espacio_entre]
-
-                from PIL import Image as PILImage
-                def alto_real(ruta, ancho_mm):
-                    try:
-                        with PILImage.open(ruta) as img:
-                            w_px, h_px = img.size
-                        return ancho_mm * (h_px / w_px)
-                    except Exception: return 68
-
-                col, y_fila, alto_fila_actual = 0, pdf.get_y(), 0
-                for i, foto_path in enumerate(lista_fotos):
-                    alto_img = alto_real(foto_path, ancho_foto)
-                    if col == 0:
-                        if pdf.get_y() + alto_img + 10 > alto_pagina - margen_inferior: pdf.add_page()
-                        y_fila = pdf.get_y()
-                        alto_fila_actual = alto_img
-                    else: alto_fila_actual = max(alto_fila_actual, alto_img)
-
-                    x = x_inicio[col]
-                    try: pdf.image(foto_path, x=x, y=y_fila, w=ancho_foto)
-                    except Exception:
-                        pdf.set_xy(x, y_fila)
-                        pdf.set_font("Arial", 'I', 9)
-                        pdf.cell(ancho_foto, 6, limpiar_texto(f"(Error foto {i+1})"), 0, 0)
-                    col += 1
-                    if col == 2:
-                        col = 0
-                        pdf.set_y(y_fila + alto_fila_actual + 6)
-                        pdf.ln(2)
-                if col != 0: pdf.set_y(y_fila + alto_fila_actual + 6)
-                pdf.ln(6)
-
-            espacio_necesario = 60
-            if pdf.get_y() + espacio_necesario > 270: pdf.add_page()
-
-            pdf.ln(10)
-            pdf.set_font("Arial", 'B', 11)
-            pdf.set_fill_color(220, 230, 241)
-            pdf.cell(0, 8, "FIRMAS DE CONFORMIDAD", ln=True, fill=True)
-            pdf.ln(12)
-
-            y_firma = pdf.get_y()
-            ancho_firma = 55
-            posiciones_x = [12, 78, 144]
-            nombres_firma = [
-                limpiar_texto(nombre_admin if nombre_admin else "Administrador de la Orden de Compra"),
-                limpiar_texto(nombre_funcionario_firma if nombre_funcionario_firma else "Funcionario a Cargo"),
-                limpiar_texto(nombre_tecnico_firma if nombre_tecnico_firma else "Tecnico del Proveedor"),
-            ]
-            roles_firma = ["Administrador de la Orden de Compra", "Funcionario a Cargo del Equipo", "Tecnico del Proveedor"]
-            detalle_extra_firma = [f"{limpiar_texto(texto_orden_compra)}", "", ""]
-
-            for i, x in enumerate(posiciones_x):
-                pdf.line(x, y_firma, x + ancho_firma, y_firma)
-                pdf.set_xy(x, y_firma + 2)
-                pdf.set_font("Arial", 'B', 9)
-                pdf.cell(ancho_firma, 5, nombres_firma[i], 0, 2, 'C')
-                pdf.set_font("Arial", 'I', 8)
-                pdf.set_x(x)
-                pdf.cell(ancho_firma, 4, limpiar_texto(roles_firma[i]), 0, 2, 'C')
-                if detalle_extra_firma[i]:
-                    pdf.set_font("Arial", '', 7)
-                    pdf.set_x(x)
-                    pdf.cell(ancho_firma, 4, detalle_extra_firma[i], 0, 0, 'C')
-
-            temp_dir = tempfile.gettempdir()
-            ruta_pdf = os.path.join(temp_dir, f"Reporte_{numero_reporte}.pdf")
+            ruta_pdf = os.path.join(tempfile.gettempdir(), f"Reporte_{numero_reporte}.pdf")
             pdf.output(ruta_pdf)
 
             try:
                 ruta_storage = f"{numero_reporte}/Reporte_{numero_reporte}.pdf"
-                with open(ruta_pdf, "rb") as f:
-                    supabase.storage.from_("reportes-mantenimiento").upload(ruta_storage, f, file_options={"content-type": "application/pdf", "upsert": "true"})
+                with open(ruta_pdf, "rb") as f: supabase.storage.from_("reportes-mantenimiento").upload(ruta_storage, f, file_options={"content-type": "application/pdf", "upsert": "true"})
                 supabase.table("mantenimientos").update({"url_reporte_pdf": ruta_storage}).eq("numero_informe", numero_reporte).execute()
-            except Exception as e_storage: mensajes.append(f"⚠️ El PDF se generó pero no se pudo guardar en el historial: {e_storage}")
-        except Exception as e: mensajes.append(f"❌ Error al crear PDF: {e}")
+            except Exception: pass
+        except Exception: pass
 
     resumen = "\n".join(mensajes)
-    historial_actualizado = cargar_historial_por_funcionario(funcionario_combo) if funcionario_combo else [["-", "-", "-", "-", "-", "-", "-"]]
-    if ruta_pdf: return f"✅ Reporte {numero_reporte} generado.\n{resumen}", gr.update(value=historial_actualizado), gr.update(value=ruta_pdf, visible=True)
-    else: return f"✅ Operación finalizada.\n{resumen}", gr.update(value=historial_actualizado), gr.update(visible=False, value=None)
+    hist = cargar_historial_por_funcionario(funcionario_combo) if funcionario_combo else [["-", "-", "-", "-", "-", "-", "-"]]
+    if ruta_pdf: return f"✅ Reporte {numero_reporte} generado.\n{resumen}", gr.update(value=hist), gr.update(value=ruta_pdf, visible=True)
+    return f"✅ Operación finalizada.\n{resumen}", gr.update(value=hist), gr.update(visible=False, value=None)
 
-def cargar_todo_ui():
-    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
-        f_inv = executor.submit(lambda: cargar_datos_inventario(as_styled=True))
-        f_sd = executor.submit(obtener_series_disponibles)
-        f_fu = executor.submit(obtener_funcionarios)
-        f_sa = executor.submit(obtener_series_asignadas)
-        f_st = executor.submit(obtener_todas_las_series)
-        f_lf = executor.submit(cargar_listado_funcionarios)
-        f_ul = executor.submit(obtener_usuarios_lista)
-        f_fm = executor.submit(obtener_funcionarios_mantenimiento)
+def descargar_reporte_mantenimiento(seleccion):
+    if not seleccion: return gr.update(visible=False, value=None), "⚠️ Selecciona un registro."
+    try:
+        numero_informe = seleccion.split(" | ")[0].strip()
+        res = supabase.table("mantenimientos").select("url_reporte_pdf").eq("numero_informe", numero_informe).limit(1).execute()
+        if not res.data or not res.data[0].get("url_reporte_pdf"): return gr.update(visible=False, value=None), f"⚠️ Sin PDF."
+        contenido = supabase.storage.from_("reportes-mantenimiento").download(res.data[0]["url_reporte_pdf"])
+        ruta = os.path.join(tempfile.gettempdir(), f"Reporte_{numero_informe}.pdf")
+        with open(ruta, "wb") as f: f.write(contenido)
+        return gr.update(value=ruta, visible=True), f"✅ Descargado."
+    except Exception as e: return gr.update(visible=False, value=None), f"❌ Error: {e}"
+
+def eliminar_mantenimiento(seleccion, request: gr.Request):
+    if not seleccion: return "⚠️ Selecciona un registro."
+    try:
+        num = seleccion.split(" | ")[0].strip()
+        id_ref = int(seleccion.split("id:")[-1])
+        res = supabase.table("mantenimientos").select("id, url_reporte_pdf").eq("numero_informe", num).execute() if num and not num.startswith("ID-") else supabase.table("mantenimientos").select("id, url_reporte_pdf").eq("id", id_ref).execute()
         
-        return (f_inv.result(), f_sd.result(), f_fu.result(), f_sa.result(), f_st.result(), f_lf.result(), f_fu.result(), f_ul.result(), f_fm.result())
+        ids_borrar = [r["id"] for r in res.data] if res.data else [id_ref]
+        ruta_pdf = next((r.get("url_reporte_pdf") for r in res.data if r.get("url_reporte_pdf")), None) if res.data else None
 
-def inicializar_sistema_completo(request: gr.Request):
-    usuario = request.username if request else ""
-    es_admin = False
-    try:
-        res_rol = supabase.table("usuarios_sistema").select("rol").eq("usuario", usuario).execute()
-        if res_rol.data and res_rol.data[0].get('rol') == 'admin': es_admin = True
-    except: pass
-    
-    panel_seg = gr.update(visible=es_admin)
-    panel_den = gr.update(visible=not es_admin)
-    
-    with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
-        f_aud = executor.submit(cargar_datos_auditoria)
-        f_usr = executor.submit(cargar_usuarios_sistema)
-        f_inv = executor.submit(lambda: cargar_datos_inventario(as_styled=True))
-        f_sd = executor.submit(obtener_series_disponibles)
-        f_fu = executor.submit(obtener_funcionarios)
-        f_sa = executor.submit(obtener_series_asignadas)
-        f_st = executor.submit(obtener_todas_las_series)
-        f_lf = executor.submit(cargar_listado_funcionarios)
-        f_ul = executor.submit(obtener_usuarios_lista)
-        f_fm = executor.submit(obtener_funcionarios_mantenimiento)
-        
-        return (f_aud.result(), f_usr.result(), f_inv.result(), f_sd.result(), f_fu.result(), f_sa.result(), f_st.result(), f_lf.result(), f_fu.result(), f_ul.result(), f_fm.result(), panel_seg, panel_den, f_fm.result())
-
-def seleccionar_funcionario_tabla(evt: gr.SelectData, tabla_actual):
-    try:
-        if tabla_actual.empty: return "", "", "", "", None
-        fila = evt.index[0]
-        return str(tabla_actual.iloc[fila, 0]), str(tabla_actual.iloc[fila, 1]), str(tabla_actual.iloc[fila, 2]), str(tabla_actual.iloc[fila, 3]), f"{str(tabla_actual.iloc[fila, 1])} - {str(tabla_actual.iloc[fila, 0])}"
-    except Exception: return "", "", "", "", None
-
-def seleccionar_usuario_tabla(evt: gr.SelectData, tabla_actual):
-    try:
-        if tabla_actual.empty: return "", "admin", None
-        fila = evt.index[0]
-        usr = str(tabla_actual.iloc[fila, 0])
-        rol = str(tabla_actual.iloc[fila, 1]).lower()
-        if rol not in ["admin", "operador"]: rol = "admin"
-        return usr, rol, f"{usr} - {rol}"
-    except Exception: return "", "admin", None
-
-def seleccionar_inventario_tabla(evt: gr.SelectData, tabla_actual):
-    try:
-        if tabla_actual is None or len(tabla_actual) == 0: return None, "", "", None
-        if isinstance(tabla_actual, pd.DataFrame):
-            fila = evt.index[0]
-            tipo = str(tabla_actual.iloc[fila, 0])
-            serie = str(tabla_actual.iloc[fila, 2])
-            custodio = str(tabla_actual.iloc[fila, 3])
-            estado = str(tabla_actual.iloc[fila, 5]) 
-        else:
-            fila = evt.index[0]
-            tipo = str(tabla_actual[fila][0])
-            serie = str(tabla_actual[fila][2])
-            custodio = str(tabla_actual[fila][3])
-            estado = str(tabla_actual[fila][5])
+        for id_reg in ids_borrar: supabase.table("mantenimientos").delete().eq("id", id_reg).execute()
+        if ruta_pdf:
+            try: supabase.storage.from_("reportes-mantenimiento").remove([ruta_pdf])
+            except Exception: pass
             
-        return f"{serie} - {tipo}", estado, tipo, (f"{serie} - {tipo} ({custodio})" if custodio != "Sin Asignar" else None)
-    except Exception: return None, "", "", None
+        registrar_auditoria(request.username if request else "Sistema", f"Eliminó mantenimiento {num}.")
+        return f"🗑️ Eliminado correctamente."
+    except Exception as e: return f"❌ Error: {e}"
 
-def cargar_datos_funcionario_form(funcionario_combo):
-    if not funcionario_combo: return "", "", "", ""
-    cedula_limpia = str(funcionario_combo).split(" - ")[-1].strip()
+def cargar_datos_mantenimiento_edicion(seleccion):
+    if not seleccion: return "", "", "", "", "", 0.0
     try:
-        res = supabase.table("funcionarios").select("*").eq("cedula", cedula_limpia).execute()
+        numero_informe = seleccion.split(" | ")[0].strip()
+        id_referencia = int(seleccion.split("id:")[-1])
+        if numero_informe and not numero_informe.startswith("ID-"):
+            res = supabase.table("mantenimientos").select("*").eq("numero_informe", numero_informe).limit(1).execute()
+        else:
+            res = supabase.table("mantenimientos").select("*").eq("id", id_referencia).execute()
+
         if res.data:
-            f = res.data[0]
-            return f.get("cedula", ""), f.get("nombres_completos", ""), f.get("cargo", ""), f.get("departamento", "")
-        return "", "", "", ""
-    except: return "", "", "", ""
+            item = res.data[0]
+            return (
+                item.get("fecha", ""),
+                item.get("proximo_mantenimiento", ""),
+                item.get("tipo_mantenimiento", ""),
+                item.get("tecnico_proveedor", ""),
+                item.get("descripcion", ""),
+                float(item.get("costo", 0.0))
+            )
+        return "", "", "", "", "", 0.0
+    except Exception as e:
+        print(f"Error cargando edicion mant: {e}")
+        return "", "", "", "", "", 0.0
 
-def cargar_datos_usuario_form(usuario_combo):
-    if not usuario_combo: return "", "admin"
-    usuario_limpio = str(usuario_combo).split(" - ")[0].strip()
+def guardar_edicion_mantenimiento(seleccion, fecha, tipo, tecnico, desc, costo, proximo, request: gr.Request):
+    usuario = request.username if request else "Sistema"
+    if not seleccion: return "⚠️ Selecciona un registro primero en el desplegable de arriba."
     try:
-        res = supabase.table("usuarios_sistema").select("*").eq("usuario", usuario_limpio).execute()
-        if res.data: return res.data[0].get("usuario", ""), res.data[0].get("rol", "admin")
-        return "", "admin"
-    except: return "", "admin"
+        numero_informe = seleccion.split(" | ")[0].strip()
+        id_referencia = int(seleccion.split("id:")[-1])
+
+        datos_actualizar = {
+            "fecha": fecha,
+            "tipo_mantenimiento": tipo,
+            "tecnico_proveedor": tecnico,
+            "descripcion": desc,
+            "costo": float(costo) if costo else 0.0,
+            "proximo_mantenimiento": proximo if proximo else None
+        }
+
+        if numero_informe and not numero_informe.startswith("ID-"):
+            supabase.table("mantenimientos").update(datos_actualizar).eq("numero_informe", numero_informe).execute()
+        else:
+            supabase.table("mantenimientos").update(datos_actualizar).eq("id", id_referencia).execute()
+
+        registrar_auditoria(usuario, f"Editó registro de mantenimiento: {numero_informe}")
+        return f"✅ Registro {numero_informe} actualizado correctamente."
+    except Exception as e: return f"❌ Error al editar: {e}"
 
 def analizar_acta_pdf(archivo_acta):
-    if not archivo_acta: return None, {}, "⚠️ Sube un Acta primero."
+    if not archivo_acta: return None, {}, "⚠️ Sube un Acta."
     try:
-        reader = PdfReader(archivo_acta)
-        texto_acta = "".join(pagina.extract_text() + "\n" for pagina in reader.pages)
-        prompt = f"""Lee el Acta. Extrae los datos y devuelve UNICAMENTE un objeto JSON puro (sin comillas invertidas ni bloques markdown).
-ESTRUCTURA EXACTA Y OBLIGATORIA DEL JSON:
+        t = "".join(p.extract_text() + "\n" for p in PdfReader(archivo_acta).pages)
+        p = f"""Extrae a JSON puro (sin markdown ni comillas raras):
 {{
-    "numero_proceso_sercop": "Escribe aquí el proceso",
-    "numero_orden_compra": "Escribe aquí la orden",
-    "razon_social_proveedor": "ESCRIBE_AQUI_EL_NOMBRE_DEL_PROVEEDOR",
-    "nombre_comercial_proveedor": "Opcional: Si el acta menciona un nombre comercial distinto a la razón social, ponlo aquí",
-    "objeto_contratacion": "Escribe aquí el objeto",
-    "monto": 0.0,
-    "equipos": [
-        {{"tipo": "Ej: Laptop", "marca": "Ej: Dell", "modelo": "Ej: Latitude", "serie": "Ej: 12345", "observaciones": "Cualquier detalle extra (opcional)"}}
-    ]
+    "numero_proceso_sercop": "Proceso", "numero_orden_compra": "Orden",
+    "razon_social_proveedor": "Proveedor", "nombre_comercial": "Nombre Comercial", "objeto_contratacion": "Objeto", "monto": 0.0,
+    "equipos": [ {{"tipo": "Laptop", "marca": "Dell", "modelo": "Latitude", "serie": "123", "observaciones": ""}} ]
 }}
-REGLA VITAL: Debes extraer TODOS Y CADA UNO de los equipos físicos mencionados en el acta. No omitas ninguno.
-Texto del acta: {texto_acta}"""
-        respuesta = llamar_gemini_con_reintentos(prompt)
-        texto_json = respuesta.text.strip()
-        marcador = "`" + "`" + "`"
-        if texto_json.startswith(marcador + "json"): texto_json = texto_json[7:]
-        if texto_json.startswith(marcador): texto_json = texto_json[3:]
-        if texto_json.endswith(marcador): texto_json = texto_json[:-3]
+Acta: {t}"""
+        res = llamar_gemini_con_reintentos(p).text.strip()
+        for m in ["```json", "```"]: res = res.replace(m, "")
+        d = json.loads(res.strip())
         
-        datos = json.loads(texto_json.strip())
-        proveedor = datos.get("razon_social_proveedor", "No especificado")
-        nombre_comercial = datos.get("nombre_comercial_proveedor", "")
-        orden = datos.get("numero_orden_compra", "Sin CE")
-        proceso = datos.get("numero_proceso_sercop", "Sin Proceso")
-        
-        filas = []
-        for eq in datos.get("equipos", []):
-            filas.append([
-                eq.get("tipo", ""), eq.get("marca", ""), eq.get("modelo", ""), eq.get("serie", ""),
-                proveedor, nombre_comercial, orden, proceso, eq.get("observaciones", "")
-            ])
-        return filas, datos, "✅ Acta leída. Revisa y edita los datos en la tabla de abajo, y luego presiona '2. Confirmar y Guardar'."
-    except Exception as e: return None, {}, f"❌ Error leyendo PDF: {e}"
+        f = []
+        for eq in d.get("equipos", []):
+            f.append([eq.get("tipo",""), eq.get("marca",""), eq.get("modelo",""), eq.get("serie",""), d.get("razon_social_proveedor",""), d.get("nombre_comercial",""), d.get("numero_orden_compra",""), d.get("numero_proceso_sercop",""), eq.get("observaciones","")])
+        return f, d, "✅ Acta leída. Edita en la tabla y Guarda."
+    except Exception as e: return None, {}, f"❌ Error: {e}"
 
 def procesar_acta_recepcion(tabla_datos, state_datos, request: gr.Request):
-    usuario = request.username if request else "Sistema"
-    if tabla_datos is None or tabla_datos.empty: 
-        return "⚠️ La tabla está vacía. Analiza el acta primero.", cargar_datos_inventario(as_styled=True), obtener_series_disponibles()
+    if tabla_datos is None or tabla_datos.empty: return "⚠️ Tabla vacía.", cargar_datos_inventario(), obtener_series_disponibles()
     try:
-        proveedor_extraido = str(tabla_datos.iloc[0, 4]).strip()
-        nombre_comercial_extraido = str(tabla_datos.iloc[0, 5]).strip()
-        num_orden = str(tabla_datos.iloc[0, 6]).strip()
-        num_proceso = str(tabla_datos.iloc[0, 7]).strip()
+        prov, nomc, ord_num, proc = str(tabla_datos.iloc[0,4]).strip(), str(tabla_datos.iloc[0,5]).strip(), str(tabla_datos.iloc[0,6]).strip(), str(tabla_datos.iloc[0,7]).strip()
         
-        resp_orden = supabase.table("ordenes_compra").select("id").eq("numero_proceso_sercop", num_proceso).eq("numero_orden_compra", num_orden).execute()
-        if not resp_orden.data: resp_orden = supabase.table("ordenes_compra").select("id").eq("numero_proceso_sercop", f"{num_proceso} [Ref: {num_orden}]").eq("numero_orden_compra", num_orden).execute()
+        resp_ord = supabase.table("ordenes_compra").select("id").eq("numero_proceso_sercop", proc).eq("numero_orden_compra", ord_num).execute()
+        if not resp_ord.data: resp_ord = supabase.table("ordenes_compra").select("id").eq("numero_proceso_sercop", f"{proc} [Ref: {ord_num}]").eq("numero_orden_compra", ord_num).execute()
         
-        orden_id = None
-        if resp_orden.data:
-            orden_id = resp_orden.data[0]['id']
-            supabase.table("ordenes_compra").update({"razon_social_proveedor": proveedor_extraido, "nombre_comercial": nombre_comercial_extraido}).eq("id", orden_id).execute()
+        if resp_ord.data:
+            o_id = resp_ord.data[0]['id']
+            supabase.table("ordenes_compra").update({"razon_social_proveedor": prov, "nombre_comercial": nomc}).eq("id", o_id).execute()
         else:
-            proceso_a_guardar = num_proceso
-            if num_proceso and num_proceso not in ["Sin Proceso", "-", "nan", ""]:
-                check_proceso = supabase.table("ordenes_compra").select("id").eq("numero_proceso_sercop", num_proceso).execute()
-                if check_proceso.data: proceso_a_guardar = f"{num_proceso} [Ref: {num_orden}]"
-            if not proceso_a_guardar or proceso_a_guardar in ["Sin Proceso", "-", "nan", ""]: proceso_a_guardar = f"MANUAL-{int(time.time())}"
-                
-            nueva_orden = {
-                "numero_proceso_sercop": proceso_a_guardar, "numero_orden_compra": num_orden, 
-                "razon_social_proveedor": proveedor_extraido, "nombre_comercial": nombre_comercial_extraido,
-                "objeto_contratacion": state_datos.get("objeto_contratacion", "Adquisición automática por Acta"), 
-                "monto": float(state_datos.get("monto", 0.0)) if state_datos.get("monto") else 0.0, "fecha_adquisicion": "2023-01-01"
-            }
-            res_insert = supabase.table("ordenes_compra").insert(nueva_orden).execute()
-            orden_id = res_insert.data[0]['id']
+            proc_g = f"{proc} [Ref: {ord_num}]" if supabase.table("ordenes_compra").select("id").eq("numero_proceso_sercop", proc).execute().data else proc
+            if not proc_g or proc_g in ["Sin Proceso", "-", "nan", ""]: proc_g = f"MANUAL-{int(time.time())}"
+            o_id = supabase.table("ordenes_compra").insert({"numero_proceso_sercop": proc_g, "numero_orden_compra": ord_num, "razon_social_proveedor": prov, "nombre_comercial": nomc, "objeto_contratacion": state_datos.get("objeto_contratacion", ""), "monto": float(state_datos.get("monto", 0)), "fecha_adquisicion": "2023-01-01"}).execute().data[0]['id']
             
-        res_todos = supabase.table("equipos").select("id, numero_serie").execute()
-        mapa_equipos_db = {}
-        for eq_db in res_todos.data:
-            if eq_db.get("numero_serie"):
-                s_limpia = str(eq_db["numero_serie"]).strip().upper().replace(" ", "")
-                mapa_equipos_db[s_limpia] = eq_db["id"]
+        m_db = {str(eq["numero_serie"]).strip().upper().replace(" ", ""): eq["id"] for eq in supabase.table("equipos").select("id, numero_serie").execute().data if eq.get("numero_serie")}
+        n, a = 0, 0
 
-        registros_nuevos = 0
-        registros_actualizados = 0
-
-        for index, row in tabla_datos.iterrows():
-            tipo = str(row.iloc[0]).strip()
-            marca = str(row.iloc[1]).strip()
-            modelo = str(row.iloc[2]).strip()
-            serie_acta = str(row.iloc[3]).strip()
-            observaciones = str(row.iloc[8]).strip()
-            
-            if not serie_acta or serie_acta.lower() == 'nan': continue
-
-            serie_limpia_acta = serie_acta.upper().replace(" ", "")
-            equipo_id_existente = mapa_equipos_db.get(serie_limpia_acta)
-
-            try:
-                if equipo_id_existente:
-                    supabase.table("equipos").update({"orden_id": orden_id, "tipo_equipo": tipo, "marca": marca, "modelo": modelo, "observaciones": observaciones}).eq("id", equipo_id_existente).execute()
-                    registros_actualizados += 1
-                else:
-                    supabase.table("equipos").insert({"orden_id": orden_id, "tipo_equipo": tipo, "marca": marca, "modelo": modelo, "numero_serie": serie_acta, "estado": "Operativo", "observaciones": observaciones}).execute()
-                    registros_nuevos += 1
-            except Exception as e: print(f"Error vinculando serie {serie_acta}: {e}")
+        for _, r in tabla_datos.iterrows():
+            t, ma, mo, s, ob = str(r.iloc[0]).strip(), str(r.iloc[1]).strip(), str(r.iloc[2]).strip(), str(r.iloc[3]).strip(), str(r.iloc[8]).strip()
+            if not s or s.lower() == 'nan': continue
+            e_id = m_db.get(s.upper().replace(" ", ""))
+            if e_id: supabase.table("equipos").update({"tipo_equipo": t, "marca": ma, "modelo": mo, "observaciones": ob}).eq("id", e_id).execute(); a+=1
+            else: supabase.table("equipos").insert({"orden_id": o_id, "tipo_equipo": t, "marca": ma, "modelo": mo, "numero_serie": s, "estado": "Operativo", "observaciones": ob}).execute(); n+=1
                 
-        registrar_auditoria(usuario, f"Ingresó acta. {registros_nuevos} creados, {registros_actualizados} actualizados.")
-        mensaje_interfaz = f"✅ Éxito: {registros_nuevos} equipos NUEVOS y {registros_actualizados} ACTUALIZADOS.\n🏢 Proveedor: {proveedor_extraido}"
-        return mensaje_interfaz, cargar_datos_inventario(as_styled=True), obtener_series_disponibles()
-    except Exception as e: return f"❌ Error: {e}", cargar_datos_inventario(as_styled=True), obtener_series_disponibles()
+        registrar_auditoria(request.username if request else "Sistema", f"Acta procesada: {n} nuevos, {a} act.")
+        return f"✅ {n} NUEVOS | 🔄 {a} ACTUALIZADOS.", cargar_datos_inventario(), obtener_series_disponibles()
+    except Exception as e: return f"❌ Error: {e}", cargar_datos_inventario(), obtener_series_disponibles()
 
-def ingresar_equipo_manual(proceso, orden, proveedor, nombre_comercial, objeto, monto, tipo, marca, modelo, serie, observaciones, request: gr.Request):
-    usuario = request.username if request else "Sistema"
-    if not orden or not serie: return "⚠️ Faltan datos.", cargar_datos_inventario(as_styled=True), obtener_series_disponibles()
-
-    orden = str(orden).strip()
-    proceso_limpio = str(proceso).strip() if proceso else ""
-
+def ingresar_equipo_manual(proc, ord_num, prov, nom_com, obj, monto, tipo, marca, modelo, serie, obs, request: gr.Request):
+    if not ord_num or not serie: return "⚠️ Faltan datos.", cargar_datos_inventario(), obtener_series_disponibles()
     try:
-        resp_orden = supabase.table("ordenes_compra").select("id").eq("numero_proceso_sercop", proceso_limpio).eq("numero_orden_compra", orden).execute()
-        if not resp_orden.data: resp_orden = supabase.table("ordenes_compra").select("id").eq("numero_proceso_sercop", f"{proceso_limpio} [Ref: {orden}]").eq("numero_orden_compra", orden).execute()
-            
-        orden_id = None
-        if resp_orden.data:
-            orden_id = resp_orden.data[0]['id']
-            actualizaciones = {}
-            if proveedor: actualizaciones["razon_social_proveedor"] = proveedor
-            if nombre_comercial: actualizaciones["nombre_comercial"] = nombre_comercial
-            if actualizaciones: supabase.table("ordenes_compra").update(actualizaciones).eq("id", orden_id).execute()
+        proc_l = str(proc).strip()
+        resp_ord = supabase.table("ordenes_compra").select("id").eq("numero_proceso_sercop", proc_l).eq("numero_orden_compra", str(ord_num).strip()).execute()
+        if not resp_ord.data: resp_ord = supabase.table("ordenes_compra").select("id").eq("numero_proceso_sercop", f"{proc_l} [Ref: {str(ord_num).strip()}]").eq("numero_orden_compra", str(ord_num).strip()).execute()
+        
+        if resp_ord.data: 
+            o_id = resp_ord.data[0]['id']
+            upd = {}
+            if prov: upd["razon_social_proveedor"] = prov
+            if nom_com: upd["nombre_comercial"] = nom_com
+            if upd: supabase.table("ordenes_compra").update(upd).eq("id", o_id).execute()
         else:
-            proceso_a_guardar = proceso_limpio
-            if proceso_limpio and proceso_limpio not in ["Sin Proceso", "-", "nan", ""]:
-                check_proceso = supabase.table("ordenes_compra").select("id").eq("numero_proceso_sercop", proceso_limpio).execute()
-                if check_proceso.data: proceso_a_guardar = f"{proceso_limpio} [Ref: {orden}]"
-            if not proceso_a_guardar or proceso_a_guardar in ["Sin Proceso", "-", "nan", ""]: proceso_a_guardar = f"MANUAL-{int(time.time())}"
-                
-            nueva_orden = {
-                "numero_proceso_sercop": proceso_a_guardar, "numero_orden_compra": orden,
-                "razon_social_proveedor": proveedor or "No especificado", "nombre_comercial": nombre_comercial or "",
-                "objeto_contratacion": objeto or "Adquisición Manual", "monto": float(monto) if monto else 0.0,
-                "fecha_adquisicion": "2023-01-01"
-            }
-            res_insert = supabase.table("ordenes_compra").insert(nueva_orden).execute()
-            orden_id = res_insert.data[0]['id']
-
-        supabase.table("equipos").insert({"orden_id": orden_id, "tipo_equipo": tipo or "No definido", "marca": marca or "No definida", "modelo": modelo or "No definido", "numero_serie": serie, "estado": "Operativo", "observaciones": observaciones or ""}).execute()
-        registrar_auditoria(usuario, f"Ingresó equipo manual {serie}.")
-        return f"✅ Equipo '{serie}' ingresado.", cargar_datos_inventario(as_styled=True), obtener_series_disponibles()
-
-    except Exception as e:
-        if '23505' in str(e):
-            if 'numero_serie' in str(e) or 'serie' in str(e).lower(): return f"❌ Error: La serie '{serie}' ya existe.", cargar_datos_inventario(as_styled=True), obtener_series_disponibles()
-            return f"❌ Error: Ya existe una orden con ese Proceso SERCOP u Orden de Compra. Detalle: {e}", cargar_datos_inventario(as_styled=True), obtener_series_disponibles()
-        return f"❌ Error: {e}", cargar_datos_inventario(as_styled=True), obtener_series_disponibles()
-
-def registrar_y_actualizar(cedula, nombres, cargo, departamento, request: gr.Request):
-    usuario = request.username if request else "Sistema"
-    cedula_limpia = cedula.strip()
-    if not cedula_limpia or not nombres: return "⚠️ Faltan datos.", obtener_funcionarios(), cargar_listado_funcionarios(), obtener_funcionarios()
-    try:
-        res = supabase.table("funcionarios").select("id").eq("cedula", cedula_limpia).execute()
-        if res.data:
-            supabase.table("funcionarios").update({"nombres_completos": nombres, "cargo": cargo, "departamento": departamento}).eq("cedula", cedula_limpia).execute()
-            registrar_auditoria(usuario, f"Actualizó datos de {nombres}.")
-            mensaje = f"✅ Datos actualizados."
-        else:
-            supabase.table("funcionarios").insert({"cedula": cedula_limpia, "nombres_completos": nombres, "cargo": cargo, "departamento": departamento}).execute()
-            registrar_auditoria(usuario, f"Registró a {nombres}.")
-            mensaje = f"✅ Funcionario registrado."
-        return mensaje, obtener_funcionarios(), cargar_listado_funcionarios(), obtener_funcionarios()
-    except Exception as e: return f"❌ Error: {e}", obtener_funcionarios(), cargar_listado_funcionarios(), obtener_funcionarios()
-
-def eliminar_funcionario(cedula, request: gr.Request):
-    usuario = request.username if request else "Sistema"
-    cedula_limpia = cedula.strip() if cedula else ""
-    if not cedula_limpia: return "⚠️ Debes ingresar o seleccionar el Código del GAD del funcionario a eliminar.", obtener_funcionarios(), cargar_listado_funcionarios(), obtener_funcionarios()
-    try:
-        res_func = supabase.table("funcionarios").select("id, nombres_completos").eq("cedula", cedula_limpia).execute()
-        if not res_func.data: return "⚠️ Funcionario no encontrado en la base de datos.", obtener_funcionarios(), cargar_listado_funcionarios(), obtener_funcionarios()
-        func_id = res_func.data[0]['id']
-        nombres = res_func.data[0]['nombres_completos']
-        
-        res_eq = supabase.table("equipos").select("numero_serie, tipo_equipo, marca").eq("funcionario_id", func_id).execute()
-        if res_eq.data and len(res_eq.data) > 0:
-            detalle = "\n".join([f"   • {eq.get('numero_serie', '-')} ({eq.get('tipo_equipo', '') or 'Sin tipo'} {eq.get('marca', '') or ''})".strip() for eq in res_eq.data])
-            return (
-                f"❌ ALERTA: No se puede eliminar a {nombres} porque tiene {len(res_eq.data)} equipo(s) a su cargo:\n{detalle}\n\n"
-                f"Ve a la pestaña '2. Custodios e Inventario' → Acordeón '6. Edición Masiva y Limpieza', libera sus equipos a estado 'Sin Asignar'. Luego vuelve a intentar eliminar a {nombres}.",
-                obtener_funcionarios(), cargar_listado_funcionarios(), obtener_funcionarios()
-            )
-        supabase.table("funcionarios").delete().eq("cedula", cedula_limpia).execute()
-        registrar_auditoria(usuario, f"Eliminó al funcionario: {nombres} ({cedula_limpia}).")
-        return f"🗑️ Funcionario {nombres} eliminado correctamente.", obtener_funcionarios(), cargar_listado_funcionarios(), obtener_funcionarios()
-    except Exception as e: return f"❌ Error al eliminar: {e}", obtener_funcionarios(), cargar_listado_funcionarios(), obtener_funcionarios()
-
-def asignar_custodio_equipo(serie_combo, funcionario_combo, archivo_garantia, request: gr.Request):
-    usuario = request.username if request else "Sistema"
-    if not serie_combo or not funcionario_combo: 
-        return "⚠️ Faltan selecciones.", cargar_datos_inventario(as_styled=True), obtener_series_disponibles(), obtener_funcionarios(), obtener_series_asignadas()
-    
-    serie_limpia = serie_combo.split(" - ")[0].strip()
-    cedula_limpia = str(funcionario_combo).split(" - ")[-1].strip()
-    nombre_custodio = str(funcionario_combo).split(" - ")[0].strip()
-    
-    try:
-        res_func = supabase.table("funcionarios").select("id").eq("cedula", cedula_limpia).execute()
-        if not res_func.data: return "❌ Error: Funcionario no encontrado.", cargar_datos_inventario(as_styled=True), obtener_series_disponibles(), obtener_funcionarios(), obtener_series_asignadas()
+            proc_g = f"{proc_l} [Ref: {ord_num}]" if supabase.table("ordenes_compra").select("id").eq("numero_proceso_sercop", proc_l).execute().data else proc_l
+            if not proc_g or proc_g in ["Sin Proceso", "-", "nan", ""]: proc_g = f"MANUAL-{int(time.time())}"
+            o_id = supabase.table("ordenes_compra").insert({"numero_proceso_sercop": proc_g, "numero_orden_compra": ord_num, "razon_social_proveedor": prov or "", "nombre_comercial": nom_com or "", "objeto_contratacion": obj or "", "monto": float(monto or 0), "fecha_adquisicion": "2023-01-01"}).execute().data[0]['id']
             
-        func_id = res_func.data[0]['id']
-        res_eq = supabase.table("equipos").select("id, numero_serie").ilike("numero_serie", f"{serie_limpia}%").execute()
-        
-        if not res_eq.data: return f"❌ Error: El equipo {serie_limpia} no fue encontrado en la base de datos.", cargar_datos_inventario(as_styled=True), obtener_series_disponibles(), obtener_funcionarios(), obtener_series_asignadas()
-
-        equipo_id = res_eq.data[0]['id']
-        serie_real = res_eq.data[0]['numero_serie']
-        
-        supabase.table("equipos").update({"funcionario_id": func_id}).eq("id", equipo_id).execute()
-
-        mensaje_final = f"✅ Equipo {serie_real} asignado a {nombre_custodio}."
-        registrar_auditoria(usuario, f"Asignó {serie_real} a {nombre_custodio}.")
-        
-        if archivo_garantia:
-            texto_garantia = "".join(pagina.extract_text() + "\n" for pagina in PdfReader(archivo_garantia).pages)
-            res_ia = llamar_gemini_con_reintentos(f"Extrae tiempo de garantía: {texto_garantia}")
-            mensaje_final += f"\n\n📜 GARANTÍA:\n{res_ia.text.strip()}"
-            
-        return mensaje_final, cargar_datos_inventario(as_styled=True), obtener_series_disponibles(), obtener_funcionarios(), obtener_series_asignadas()
-    except Exception as e: return f"❌ Error: {e}", cargar_datos_inventario(as_styled=True), obtener_series_disponibles(), obtener_funcionarios(), obtener_series_asignadas()
-
-def liberar_equipo(serie_liberar_combo, request: gr.Request):
-    usuario = request.username if request else "Sistema"
-    if not serie_liberar_combo: return "⚠️ Selecciona un equipo.", cargar_datos_inventario(as_styled=True), obtener_series_disponibles(), obtener_series_asignadas()
-    serie_limpia = serie_liberar_combo.split(" - ")[0].strip()
-    try:
-        res_eq = supabase.table("equipos").select("id, numero_serie").ilike("numero_serie", f"{serie_limpia}%").execute()
-        if res_eq.data:
-            supabase.table("equipos").update({"funcionario_id": None}).eq("id", res_eq.data[0]['id']).execute()
-            registrar_auditoria(usuario, f"Liberó equipo {res_eq.data[0]['numero_serie']}.")
-            return f"🔓 Equipo {res_eq.data[0]['numero_serie']} liberado.", cargar_datos_inventario(as_styled=True), obtener_series_disponibles(), obtener_series_asignadas()
-        return "❌ Error: Equipo no encontrado.", cargar_datos_inventario(as_styled=True), obtener_series_disponibles(), obtener_series_asignadas()
-    except Exception as e: return f"❌ Error: {e}", cargar_datos_inventario(as_styled=True), obtener_series_disponibles(), obtener_series_asignadas()
-
-def eliminar_equipo_inventario(serie_eliminar_combo, motivo, request: gr.Request):
-    usuario = request.username if request else "Sistema"
-    if not serie_eliminar_combo: return "⚠️ Selecciona un equipo para dar de baja.", cargar_datos_inventario(as_styled=True), obtener_series_disponibles(), obtener_series_asignadas(), obtener_todas_las_series(), cargar_datos_auditoria(), gr.update()
-    if not motivo or not str(motivo).strip(): return "⚠️ OBLIGATORIO: Debes escribir el motivo por el cual das de baja o eliminas este bien.", cargar_datos_inventario(as_styled=True), obtener_series_disponibles(), obtener_series_asignadas(), obtener_todas_las_series(), cargar_datos_auditoria(), gr.update()
-
-    serie_limpia = str(serie_eliminar_combo).split(" - ")[0].strip()
-    try:
-        res = supabase.table("equipos").select("id, tipo_equipo, marca, modelo, numero_serie, estado, observaciones, funcionario_id").ilike("numero_serie", f"{serie_limpia}%").execute()
-        if not res.data: return f"❌ El equipo '{serie_limpia}' no fue encontrado en la base de datos.", cargar_datos_inventario(as_styled=True), obtener_series_disponibles(), obtener_series_asignadas(), obtener_todas_las_series(), cargar_datos_auditoria(), gr.update()
-
-        equipo = res.data[0]
-        serie_real = equipo['numero_serie']
-
-        if equipo.get("funcionario_id") is not None:
-            return (
-                f"❌ No se puede dar de baja: el equipo '{serie_real}' todavía tiene un custodio asignado.\nPrimero libéralo en la sección de arriba y luego vuelve a intentarlo.",
-                cargar_datos_inventario(as_styled=True), obtener_series_disponibles(), obtener_series_asignadas(), obtener_todas_las_series(), cargar_datos_auditoria(), gr.update()
-            )
-
-        obs_actual = equipo.get("observaciones") or ""
-        nueva_obs = f"[ELIMINADO / DE BAJA - Motivo: {str(motivo).strip()}] {obs_actual}".strip()
-        
-        supabase.table("equipos").update({"estado": "De Baja", "observaciones": nueva_obs, "funcionario_id": None}).eq("id", equipo["id"]).execute()
-        registrar_auditoria(usuario, f"🗑️ DIO DE BAJA el equipo '{serie_real}'. Motivo: {motivo}")
-
-        mensaje = f"🗑️ Equipo '{serie_real}' dado de baja correctamente.\n✅ El equipo ahora se mostrará en color rojo y el motivo ha sido añadido a sus observaciones."
-        return mensaje, cargar_datos_inventario(as_styled=True), obtener_series_disponibles(), obtener_series_asignadas(), obtener_todas_las_series(), cargar_datos_auditoria(), gr.update(value="")
-    except Exception as e: return f"❌ Error al eliminar: {e}", cargar_datos_inventario(as_styled=True), obtener_series_disponibles(), obtener_series_asignadas(), obtener_todas_las_series(), cargar_datos_auditoria(), gr.update()
-
-def advertencia_asignacion(funcionario_combo):
-    if not funcionario_combo: return ""
-    try:
-        res_func = supabase.table("funcionarios").select("id").eq("cedula", funcionario_combo.split(" - ")[-1]).execute()
-        if res_func.data:
-            res_eq = supabase.table("equipos").select("tipo_equipo").eq("funcionario_id", res_func.data[0]['id']).execute()
-            if len(res_eq.data) > 0: return f"⚠️ ADVERTENCIA: Esta persona ya tiene {len(res_eq.data)} equipo(s)."
-        return "ℹ️ Sin equipos asignados."
-    except Exception: return ""
+        supabase.table("equipos").insert({"orden_id": o_id, "tipo_equipo": tipo or "", "marca": marca or "", "modelo": modelo or "", "numero_serie": serie, "estado": "Operativo", "observaciones": obs or ""}).execute()
+        registrar_auditoria(request.username if request else "Sistema", f"Equipo manual {serie}.")
+        return f"✅ Equipo '{serie}' ingresado.", cargar_datos_inventario(), obtener_series_disponibles()
+    except Exception as e: return f"❌ Error: {e}", cargar_datos_inventario(), obtener_series_disponibles()
 
 def analizar_excel_masivo(archivo_excel):
-    if not archivo_excel: return "⚠️ Sube un archivo de Excel.", []
+    if not archivo_excel: return "⚠️ Sube Excel.", []
     try:
         df_raw = pd.read_excel(archivo_excel, header=None)
-        header_idx = -1
-        for i, row in df_raw.iterrows():
-            row_str = " ".join(str(val).lower() for val in row.values)
-            if 'serie' in row_str and ('nombre' in row_str or 'funcionario' in row_str or 'custodio' in row_str):
-                header_idx = i
-                break
-                
-        if header_idx == -1: return "❌ Error: No se encontró la tabla de datos.", []
-            
-        df = pd.read_excel(archivo_excel, header=header_idx)
+        h_idx = next((i for i, r in df_raw.iterrows() if 'serie' in " ".join(str(v).lower() for v in r.values) and ('nombre' in " ".join(str(v).lower() for v in r.values) or 'custodio' in " ".join(str(v).lower() for v in r.values))), -1)
+        if h_idx == -1: return "❌ Sin tabla.", []
+        df = pd.read_excel(archivo_excel, header=h_idx)
         df.columns = df.columns.astype(str).str.strip().str.lower()
         
-        col_serie = next((c for c in df.columns if 'serie' in c), None)
-        col_cedula = next((c for c in df.columns if 'cedula' in c or 'cédula' in c or 'identificacion' in c or 'cód' in c or 'cod' in c or 'codigo' in c), None)
-        col_nombres = next((c for c in df.columns if 'nombre' in c or 'funcionario' in c or 'custodio' in c), None)
-        col_cargo = next((c for c in df.columns if 'cargo' in c), None)
-        col_depto = next((c for c in df.columns if 'departamento' in c or 'area' in c or 'dirección' in c), None)
+        c_serie = next((c for c in df.columns if 'serie' in c), None)
+        c_ced = next((c for c in df.columns if any(x in c for x in ['cedula','cédula','identificacion','cód','cod'])), None)
+        c_nom = next((c for c in df.columns if any(x in c for x in ['nombre','funcionario','custodio'])), None)
+        c_car = next((c for c in df.columns if 'cargo' in c), None)
+        c_dep = next((c for c in df.columns if any(x in c for x in ['departamento','area','dirección'])), None)
 
-        res_all_eq = supabase.table("equipos").select("numero_serie").execute()
-        equipos_db = {str(eq.get("numero_serie", "")).strip().upper().replace(" ", ""): str(eq.get("numero_serie", "")) for eq in res_all_eq.data}
-            
-        res_all_func = supabase.table("funcionarios").select("cedula, nombres_completos").execute()
-        funcionarios_db_cedulas = {str(f.get("cedula", "")).strip(): True for f in res_all_func.data}
-        funcionarios_db_nombres = {str(f.get("nombres_completos", "")).strip().upper(): str(f.get("cedula", "")).strip() for f in res_all_func.data}
+        eq_db = {str(eq.get("numero_serie", "")).strip().upper().replace(" ", ""): str(eq.get("numero_serie", "")) for eq in supabase.table("equipos").select("numero_serie").execute().data}
+        f_db = {str(f.get("nombres_completos", "")).strip().upper(): str(f.get("cedula", "")).strip() for f in supabase.table("funcionarios").select("cedula, nombres_completos").execute().data}
+        
+        vp = []
+        for _, r in df.iterrows():
+            nom = str(r[c_nom]).strip() if c_nom and pd.notna(r[c_nom]) else "Sin Nombre"
+            ser = str(r[c_serie]).strip().upper().replace(" ", "") if c_serie and pd.notna(r[c_serie]) else ""
+            if ser.endswith('.0'): ser = ser[:-2]
+            ced = str(r[c_ced]).strip() if c_ced and pd.notna(r[c_ced]) else ""
+            if ced.endswith('.0'): ced = ced[:-2]
+            if not ced or ced.lower() == 'nan':
+                for v in r.values:
+                    vs = str(v).strip().replace(".0", "")
+                    if vs.isdigit() and len(vs) in [9, 10]: ced = vs; break
+            if len(ced) == 9 and ced.isdigit(): ced = "0" + ced
+            if (not ced or ced.lower() == 'nan') and nom != "Sin Nombre": ced = f_db.get(nom.upper(), "")
 
-        vista_previa = []
-        filas_leidas = 0
+            car = str(r[c_car]).strip() if c_car and pd.notna(r[c_car]) else "No definido"
+            dep = str(r[c_dep]).strip() if c_dep and pd.notna(r[c_dep]) else "No definido"
 
-        for index, row in df.iterrows():
-            nombres = str(row[col_nombres]).strip() if col_nombres and pd.notna(row[col_nombres]) else "Sin Nombre"
-            serie_excel = str(row[col_serie]) if col_serie and pd.notna(row[col_serie]) else ""
-            serie_limpia = serie_excel.strip().upper().replace(" ", "")
-            if serie_limpia.endswith('.0'): serie_limpia = serie_limpia[:-2]
-            
-            cedula_excel = str(row[col_cedula]) if col_cedula and pd.notna(row[col_cedula]) else ""
-            cedula = cedula_excel.strip()
-            if cedula.endswith('.0'): cedula = cedula[:-2]
-            
-            if not cedula or cedula.lower() == 'nan':
-                for val in row.values:
-                    v_str = str(val).strip()
-                    if v_str.endswith('.0'): v_str = v_str[:-2]
-                    if v_str.isdigit() and len(v_str) in [9, 10]:
-                        cedula = v_str
-                        break
-                        
-            if len(cedula) == 9 and cedula.isdigit(): cedula = "0" + cedula
-                
-            if (not cedula or cedula.lower() == 'nan') and nombres and nombres != "Sin Nombre":
-                cedula_encontrada = funcionarios_db_nombres.get(nombres.upper())
-                if cedula_encontrada: cedula = cedula_encontrada
+            if not ser and not ced and nom == "Sin Nombre": continue
+            sm = ser if ser and ser != 'NAN' else ""
+            cm = ced if ced and ced.lower() != 'nan' else ""
+            if not sm: vp.append(["", cm, nom, car, dep, "❌ ERROR: Falta serie"])
+            elif not eq_db.get(sm): vp.append([sm, cm, nom, car, dep, "❌ ERROR: Equipo no en BD"])
+            elif not cm: vp.append([eq_db.get(sm), "", nom, car, dep, "❌ ERROR: Falta ID"])
+            else: vp.append([eq_db.get(sm), cm, nom, car, dep, "✅ OK"])
 
-            cargo = str(row[col_cargo]).strip() if col_cargo and pd.notna(row[col_cargo]) else "No definido"
-            departamento = str(row[col_depto]).strip() if col_depto and pd.notna(row[col_depto]) else "No definido"
-
-            if (not serie_limpia or serie_limpia == 'NAN') and (not cedula or cedula.lower() == 'nan') and nombres == "Sin Nombre": continue
-                
-            filas_leidas += 1
-
-            serie_mostrar = serie_limpia if serie_limpia and serie_limpia != 'NAN' else ""
-            cedula_mostrar = cedula if cedula and cedula.lower() != 'nan' else ""
-
-            if not serie_mostrar:
-                vista_previa.append(["", cedula_mostrar, nombres, cargo, departamento, "❌ ERROR: Falta número de serie"])
-                continue
-                
-            serie_exacta_db = equipos_db.get(serie_mostrar)
-            if not serie_exacta_db:
-                vista_previa.append([serie_mostrar, cedula_mostrar, nombres, cargo, departamento, "❌ ERROR: Este equipo NO existe en BD"])
-                continue
-
-            if not cedula_mostrar:
-                vista_previa.append([serie_exacta_db, "", nombres, cargo, departamento, "❌ ERROR: Falta Código del GAD"])
-                continue
-
-            es_nuevo = cedula_mostrar not in funcionarios_db_cedulas
-            vista_previa.append([serie_exacta_db, cedula_mostrar, nombres, cargo, departamento, "⚠️ OK (Se creará funcionario)" if es_nuevo else "✅ OK"])
-
-        if filas_leidas == 0: return "⚠️ El archivo está vacío.", []
-
-        errores_encontrados = sum(1 for fila in vista_previa if "❌" in fila[-1])
-        correctos = len(vista_previa) - errores_encontrados
-        msg = f"✅ Análisis listo. {correctos} listos para asignar. (Revisa/edita las filas con ❌ ERROR en la tabla antes de confirmar)."
-        return msg, vista_previa
-
-    except Exception as e: return f"❌ Error: {str(e)}", []
+        return f"✅ Listo. {sum(1 for f in vp if '✅' in f[-1])} válidos.", vp
+    except Exception as e: return f"❌ Error: {e}", []
 
 def confirmar_asignacion_masiva(tabla_datos, request: gr.Request):
-    usuario = request.username if request else "Sistema"
-    if tabla_datos is None or tabla_datos.empty: return "⚠️ No hay datos en la tabla."
-    exitos, func_creados, errores = 0, 0, 0
-    
-    res_all_func = supabase.table("funcionarios").select("cedula, id").execute()
-    mapa_funcionarios = {str(f["cedula"]).strip(): f["id"] for f in res_all_func.data}
+    if tabla_datos is None or tabla_datos.empty: return "⚠️ Tabla vacía."
+    m_f = {str(f["cedula"]).strip(): f["id"] for f in supabase.table("funcionarios").select("cedula, id").execute().data}
+    eq_v = {str(eq.get("numero_serie", "")).strip().upper().replace(" ", ""): str(eq.get("numero_serie", "")) for eq in supabase.table("equipos").select("numero_serie").execute().data}
 
-    res_all_eq = supabase.table("equipos").select("numero_serie").execute()
-    equipos_db_validos = {str(eq.get("numero_serie", "")).strip().upper().replace(" ", ""): str(eq.get("numero_serie", "")) for eq in res_all_eq.data}
-
-    for index, row in tabla_datos.iterrows():
+    ex, nu, er = 0, 0, 0
+    for _, r in tabla_datos.iterrows():
         try:
-            serie_raw = str(row.iloc[0]).strip()
-            cedula_raw = str(row.iloc[1]).strip()
-            nombres_raw = str(row.iloc[2]).strip()
-            cargo_raw = str(row.iloc[3]).strip()
-            depto_raw = str(row.iloc[4]).strip()
+            s, c, n, car, d = str(r.iloc[0]).strip(), str(r.iloc[1]).strip(), str(r.iloc[2]).strip(), str(r.iloc[3]).strip(), str(r.iloc[4]).strip()
+            if not s or not c or s.lower() == 'nan': er+=1; continue
+            se = eq_v.get(s.upper().replace(" ", ""))
+            if not se: er+=1; continue
             
-            if not serie_raw or serie_raw.lower() == 'nan' or not cedula_raw or cedula_raw.lower() == 'nan':
-                errores += 1
-                continue
-                
-            serie_limpia = serie_raw.upper().replace(" ", "")
-            serie_exacta = equipos_db_validos.get(serie_limpia)
-            
-            if not serie_exacta:
-                errores += 1
-                continue
-            
-            func_id = mapa_funcionarios.get(cedula_raw)
-            
-            if not func_id:
-                res_insert = supabase.table("funcionarios").insert({
-                    "cedula": cedula_raw, "nombres_completos": nombres_raw, 
-                    "cargo": cargo_raw, "departamento": depto_raw
-                }).execute()
-                if res_insert.data:
-                    func_id = res_insert.data[0]["id"]
-                    mapa_funcionarios[cedula_raw] = func_id
-                    func_creados += 1
-            
-            if func_id:
-                supabase.table("equipos").update({"funcionario_id": func_id}).eq("numero_serie", serie_exacta).execute()
-                exitos += 1
-        except Exception: 
-            errores += 1
-        
-    registrar_auditoria(usuario, f"Carga masiva desde tabla: {exitos} asignados.")
-    mensaje = f"✅ Completado: {exitos} equipos asignados, {func_creados} funcionarios nuevos creados."
-    if errores > 0:
-        mensaje += f" (⚠️ Se omitieron {errores} filas por datos incompletos o series inválidas)."
-    return mensaje
+            fid = m_f.get(c)
+            if not fid:
+                res = supabase.table("funcionarios").insert({"cedula": c, "nombres_completos": n, "cargo": car, "departamento": d}).execute()
+                if res.data: fid = res.data[0]["id"]; m_f[c] = fid; nu += 1
+            if fid: supabase.table("equipos").update({"funcionario_id": fid}).eq("numero_serie", se).execute(); ex += 1
+        except Exception: er += 1
+    registrar_auditoria(request.username if request else "Sistema", f"Carga masiva: {ex} asign.")
+    return f"✅ Completado: {ex} asignados, {nu} nuevos. (Errores: {er})"
 
 def cargar_tabla_edicion(termino=""):
     try:
         res = supabase.table("equipos").select("id, numero_serie, tipo_equipo, marca, modelo, estado, observaciones, orden_id, ordenes_compra(razon_social_proveedor, nombre_comercial), funcionarios(nombres_completos, departamento)").execute()
-        datos = []
+        d = []
         for eq in res.data:
-            proveedor = ""
-            nombre_comercial = ""
-            ord_data = eq.get("ordenes_compra")
-            if isinstance(ord_data, list) and ord_data: ord_data = ord_data[0]
-            if ord_data: 
-                proveedor = ord_data.get("razon_social_proveedor", "")
-                nombre_comercial = ord_data.get("nombre_comercial", "")
+            ord_c = eq.get("ordenes_compra")
+            if isinstance(ord_c, list) and ord_c: ord_c = ord_c[0]
+            prov = ord_c.get("razon_social_proveedor", "") if ord_c else ""
+            nomc = ord_c.get("nombre_comercial", "") if ord_c else ""
 
             func = eq.get("funcionarios")
-            if isinstance(func, list) and func: func = func[0]
-            elif not isinstance(func, dict): func = {}
+            cust = func.get("nombres_completos") if func else "Sin Asignar"
+            dept = func.get("departamento") if func else "-"
+            obs = eq.get("observaciones", "") or ""
 
-            custodio = func.get("nombres_completos") if func else "Sin Asignar"
-            depto = func.get("departamento") if func else "-"
-            observaciones = eq.get("observaciones", "") or ""
+            fs = f"{eq.get('numero_serie','')} {eq.get('tipo_equipo','')} {eq.get('marca','')} {eq.get('modelo','')} {prov} {nomc} {cust} {dept}".lower()
+            if termino and termino.lower() not in fs: continue
 
-            fila_texto = f"{eq.get('numero_serie','')} {eq.get('tipo_equipo','')} {eq.get('marca','')} {eq.get('modelo','')} {proveedor} {nombre_comercial} {custodio} {depto}".lower()
-            if termino and termino.lower() not in fila_texto:
-                continue
-
-            datos.append([
-                eq["id"],
-                eq.get("numero_serie", ""),
-                eq.get("tipo_equipo", ""),
-                eq.get("marca", ""),
-                eq.get("modelo", ""),
-                custodio,
-                depto,
-                eq.get("estado", ""),
-                proveedor,
-                nombre_comercial,
-                observaciones,
-                "Mantener"
-            ])
-        if not datos:
-            return [["-", "No se encontró coincidencia", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-"]]
-        return datos
-    except Exception as e:
-        return [[f"Error: {e}", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-"]]
+            d.append([eq["id"], eq.get("numero_serie",""), eq.get("tipo_equipo",""), eq.get("marca",""), eq.get("modelo",""), cust, dept, eq.get("estado",""), prov, nomc, obs, "Mantener"])
+        return d if d else [["-", "Sin datos", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-"]]
+    except Exception as e: return [[f"Error: {e}", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-"]]
 
 def cargar_duplicados():
     try:
         res = supabase.table("equipos").select("id, numero_serie, tipo_equipo, marca, modelo, estado, observaciones, orden_id, ordenes_compra(razon_social_proveedor, nombre_comercial), funcionarios(nombres_completos, departamento)").execute()
-        conteo = {}
-        for eq in res.data:
-            s_limpia = str(eq.get("numero_serie","")).upper().replace(" ", "")
-            conteo[s_limpia] = conteo.get(s_limpia, 0) + 1
+        cont = {}
+        for eq in res.data: s = str(eq.get("numero_serie","")).upper().replace(" ", ""); cont[s] = cont.get(s, 0) + 1
 
-        datos = []
+        d = []
         for eq in res.data:
-            s_limpia = str(eq.get("numero_serie","")).upper().replace(" ", "")
-            if conteo[s_limpia] > 1:
-                proveedor = ""
-                nombre_comercial = ""
-                ord_data = eq.get("ordenes_compra")
-                if isinstance(ord_data, list) and ord_data: ord_data = ord_data[0]
-                if ord_data: 
-                    proveedor = ord_data.get("razon_social_proveedor", "")
-                    nombre_comercial = ord_data.get("nombre_comercial", "")
-                
+            if cont[str(eq.get("numero_serie","")).upper().replace(" ", "")] > 1:
+                ord_c = eq.get("ordenes_compra")
+                if isinstance(ord_c, list) and ord_c: ord_c = ord_c[0]
+                prov = ord_c.get("razon_social_proveedor", "") if ord_c else ""
+                nomc = ord_c.get("nombre_comercial", "") if ord_c else ""
+
                 func = eq.get("funcionarios")
-                if isinstance(func, list) and func: func = func[0]
-                elif not isinstance(func, dict): func = {}
-
-                custodio = func.get("nombres_completos") if func else "Sin Asignar"
-                depto = func.get("departamento") if func else "-"
-                observaciones = eq.get("observaciones", "") or ""
+                cust = func.get("nombres_completos") if func else "Sin Asignar"
+                dept = func.get("departamento") if func else "-"
                 
-                datos.append([
-                    eq["id"],
-                    eq.get("numero_serie", ""),
-                    eq.get("tipo_equipo", ""),
-                    eq.get("marca", ""),
-                    eq.get("modelo", ""),
-                    custodio,
-                    depto,
-                    eq.get("estado", ""),
-                    proveedor,
-                    nombre_comercial,
-                    observaciones,
-                    "Mantener"
-                ])
-                
-        datos.sort(key=lambda x: str(x[1]).upper().replace(" ", ""))
-        if not datos:
-            return [["-", "No se encontraron series duplicadas", "-", "-", "-", "-", "-", "-", "-", "-", "-", "Mantener"]]
-        return datos
-    except Exception as e:
-        return [[f"Error: {e}", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-"]]
+                d.append([eq["id"], eq.get("numero_serie",""), eq.get("tipo_equipo",""), eq.get("marca",""), eq.get("modelo",""), cust, dept, eq.get("estado",""), prov, nomc, eq.get("observaciones","") or "", "Mantener"])
+        d.sort(key=lambda x: str(x[1]).upper().replace(" ", ""))
+        return d if d else [["-", "Sin duplicados", "-", "-", "-", "-", "-", "-", "-", "-", "-", "Mantener"]]
+    except Exception as e: return [[f"Error: {e}", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-", "-"]]
 
 def confirmar_edicion_masiva(df, request: gr.Request):
-    usuario = request.username if request else "Sistema"
     if df is None or df.empty: return "⚠️ Tabla vacía."
-    
-    exitos_edit = 0
-    exitos_del = 0
-    errores = 0
+    e_ed, e_del, err = 0, 0, 0
 
-    res_func = supabase.table("funcionarios").select("id, nombres_completos").execute()
-    mapa_func_nombres = {str(f["nombres_completos"]).strip().upper(): f["id"] for f in res_func.data}
-
-    for index, row in df.iterrows():
+    for _, r in df.iterrows():
         try:
-            id_bd_raw = str(row.iloc[0]).strip().replace(",", "")
-            if id_bd_raw.endswith('.0'): id_bd_raw = id_bd_raw[:-2]
-            if id_bd_raw == "-" or id_bd_raw.lower() == 'nan' or id_bd_raw == "": continue
-            id_bd = id_bd_raw
+            idb_r = str(r.iloc[0]).strip().replace(",", "")
+            if idb_r.endswith('.0'): idb_r = idb_r[:-2]
+            if idb_r in ["-", "nan", ""]: continue
+            idb = idb_r
             
-            accion = str(row.iloc[11]).strip()
-            if accion.lower() == "eliminar":
-                supabase.table("equipos").delete().eq("id", id_bd).execute()
-                exitos_del += 1
+            acc = str(r.iloc[11]).strip()
+            if acc.lower() == "eliminar":
+                supabase.table("equipos").delete().eq("id", idb).execute(); e_del += 1
             else:
-                serie = str(row.iloc[1]).strip()
-                if serie.endswith('.0'): serie = serie[:-2]
+                ser = str(r.iloc[1]).strip()
+                if ser.endswith('.0'): ser = ser[:-2]
                 
-                tipo = str(row.iloc[2]).strip()
-                marca = str(row.iloc[3]).strip()
-                modelo = str(row.iloc[4]).strip()
-                custodio_editado = str(row.iloc[5]).strip()
-                depto_editado = str(row.iloc[6]).strip()
-                estado = str(row.iloc[7]).strip()
-                proveedor = str(row.iloc[8]).strip()
-                nombre_comercial = str(row.iloc[9]).strip()
-                observaciones = str(row.iloc[10]).strip()
+                d_act = {"numero_serie": ser, "tipo_equipo": str(r.iloc[2]).strip(), "marca": str(r.iloc[3]).strip(), "modelo": str(r.iloc[4]).strip(), "estado": str(r.iloc[7]).strip(), "observaciones": str(r.iloc[10]).strip()}
 
-                datos_actualizar = {
-                    "numero_serie": serie,
-                    "tipo_equipo": tipo,
-                    "marca": marca,
-                    "modelo": modelo,
-                    "estado": estado,
-                    "observaciones": observaciones
-                }
-
-                if custodio_editado and custodio_editado.lower() not in ["", "nan", "-", "sin asignar"]:
-                    func_id_nuevo = mapa_func_nombres.get(custodio_editado.upper())
-                    if func_id_nuevo:
-                        datos_actualizar["funcionario_id"] = func_id_nuevo
-                        if depto_editado and depto_editado.lower() not in ["", "nan", "-"]:
-                            supabase.table("funcionarios").update({"departamento": depto_editado}).eq("id", func_id_nuevo).execute()
-                elif custodio_editado.lower() == "sin asignar":
-                    datos_actualizar["funcionario_id"] = None
-
-                res_eq = supabase.table("equipos").select("orden_id, funcionario_id, ordenes_compra(razon_social_proveedor, nombre_comercial)").eq("id", id_bd).execute()
+                res_eq = supabase.table("equipos").select("orden_id, funcionario_id, ordenes_compra(razon_social_proveedor, nombre_comercial)").eq("id", idb).execute()
                 if res_eq.data:
-                    ord_data = res_eq.data[0].get("ordenes_compra")
-                    if isinstance(ord_data, list) and ord_data: ord_data = ord_data[0]
-                    elif not isinstance(ord_data, dict): ord_data = {}
+                    fid = res_eq.data[0].get("funcionario_id")
+                    if fid: supabase.table("funcionarios").update({"nombres_completos": str(r.iloc[5]).strip(), "departamento": str(r.iloc[6]).strip()}).eq("id", fid).execute()
+
+                    pn, nn = str(r.iloc[8]).strip(), str(r.iloc[9]).strip()
+                    ord_d = res_eq.data[0].get("ordenes_compra")
+                    if isinstance(ord_d, list) and ord_d: ord_d = ord_d[0]
+                    elif not isinstance(ord_d, dict): ord_d = {}
                     
-                    proveedor_actual = ord_data.get("razon_social_proveedor", "").strip() if ord_data else ""
-                    nombre_comercial_actual = ord_data.get("nombre_comercial", "").strip() if ord_data else ""
+                    if pn and pn != ord_d.get("razon_social_proveedor", "").strip():
+                        r_ind = supabase.table("ordenes_compra").select("id").eq("numero_proceso_sercop", f"INDIV-{ser}").execute()
+                        if r_ind.data: 
+                            supabase.table("ordenes_compra").update({"razon_social_proveedor": pn, "nombre_comercial": nn}).eq("id", r_ind.data[0]["id"]).execute()
+                            d_act["orden_id"] = r_ind.data[0]["id"]
+                        else: 
+                            d_act["orden_id"] = supabase.table("ordenes_compra").insert({"numero_proceso_sercop": f"INDIV-{ser}", "numero_orden_compra": "Independiente", "razon_social_proveedor": pn, "nombre_comercial": nn, "objeto_contratacion": "Separación", "monto": 0.0, "fecha_adquisicion": "2023-01-01"}).execute().data[0]["id"]
+                    else:
+                        if nn != ord_d.get("nombre_comercial", "").strip():
+                            supabase.table("ordenes_compra").update({"nombre_comercial": nn}).eq("id", res_eq.data[0].get("orden_id")).execute()
 
-                    if (proveedor and proveedor != proveedor_actual) or (nombre_comercial and nombre_comercial != nombre_comercial_actual):
-                        identificador_unico = f"INDIV-{serie}"
-                        res_indiv = supabase.table("ordenes_compra").select("id").eq("numero_proceso_sercop", identificador_unico).execute()
-                        if res_indiv.data:
-                            orden_nueva_id = res_indiv.data[0]["id"]
-                            supabase.table("ordenes_compra").update({
-                                "razon_social_proveedor": proveedor,
-                                "nombre_comercial": nombre_comercial
-                            }).eq("id", orden_nueva_id).execute()
-                        else:
-                            nueva_orden = {
-                                "numero_proceso_sercop": identificador_unico,
-                                "numero_orden_compra": "Independiente",
-                                "razon_social_proveedor": proveedor,
-                                "nombre_comercial": nombre_comercial,
-                                "objeto_contratacion": "Separación individual",
-                                "monto": 0.0,
-                                "fecha_adquisicion": "2023-01-01"
-                            }
-                            res_insert = supabase.table("ordenes_compra").insert(nueva_orden).execute()
-                            orden_nueva_id = res_insert.data[0]["id"]
-                        datos_actualizar["orden_id"] = orden_nueva_id
+                supabase.table("equipos").update(d_act).eq("id", idb).execute(); e_ed += 1
+        except Exception: err += 1
 
-                supabase.table("equipos").update(datos_actualizar).eq("id", id_bd).execute()
-                exitos_edit += 1
-        except Exception as e:
-            print(f"Error procesando fila ID {row.iloc[0]}: {e}")
-            errores += 1
-
-    registrar_auditoria(usuario, f"Edición Masiva/Limpieza: {exitos_edit} editados, {exitos_del} eliminados.")
-    return f"✅ Completado: {exitos_edit} actualizados, {exitos_del} eliminados. (Errores: {errores})"
+    registrar_auditoria(request.username if request else "Sistema", f"Edición Masiva: {e_ed} act, {e_del} elim.")
+    return f"✅ {e_ed} act., {e_del} elim. (Errores: {err})"
 
 def cargar_equipo_para_edicion(serie_combo):
     if not serie_combo: return "", "", "", "", "", "", "", "", None
-    serie_limpia = serie_combo.split(" - ")[0].strip()
     try:
-        res = supabase.table("equipos").select(
-            "numero_serie, marca, modelo, estado, tipo_equipo, observaciones, orden_id, funcionario_id, "
-            "ordenes_compra(razon_social_proveedor, nombre_comercial), funcionarios(nombres_completos, cedula)"
-        ).ilike("numero_serie", f"{serie_limpia}%").execute()
-
+        res = supabase.table("equipos").select("numero_serie, marca, modelo, estado, tipo_equipo, observaciones, orden_id, funcionario_id, ordenes_compra(razon_social_proveedor, nombre_comercial), funcionarios(nombres_completos, cedula)").ilike("numero_serie", f"{serie_combo.split(' - ')[0].strip()}%").execute()
         if res.data:
-            item = res.data[0]
-            serie_actual = item.get('numero_serie', '') or ''
-            marca = item.get('marca', '') or ''
-            modelo = item.get('modelo', '') or ''
-            estado = item.get('estado', '')
-            tipo = item.get('tipo_equipo', '')
-            observaciones = item.get('observaciones', '') or ''
-            ord_data = item.get('ordenes_compra')
-            if isinstance(ord_data, list) and ord_data:
-                ord_data = ord_data[0]
-            proveedor = ord_data.get('razon_social_proveedor', '') if ord_data else ''
-            nombre_comercial = ord_data.get('nombre_comercial', '') if ord_data else ''
-
-            func = item.get('funcionarios')
+            it = res.data[0]
+            ord_d = it.get('ordenes_compra')
+            if isinstance(ord_d, list) and ord_d: ord_d = ord_d[0]
+            func = it.get('funcionarios')
             if isinstance(func, list) and func: func = func[0]
             elif not isinstance(func, dict): func = {}
 
-            if item.get('funcionario_id') and func:
-                custodio_actual = f"{func.get('nombres_completos','')} - {func.get('cedula','')}"
-            else:
-                custodio_actual = "Sin Asignar - BODEGA"
-
-            return serie_actual, marca, modelo, estado, tipo, proveedor, nombre_comercial, observaciones, custodio_actual
+            cust = f"{func.get('nombres_completos','')} - {func.get('cedula','')}" if it.get('funcionario_id') and func else "Sin Asignar - BODEGA"
+            return it.get('numero_serie','') or '', it.get('marca','') or '', it.get('modelo','') or '', it.get('estado',''), it.get('tipo_equipo',''), ord_d.get('razon_social_proveedor','') if ord_d else '', ord_d.get('nombre_comercial','') if ord_d else '', it.get('observaciones','') or '', cust
         return "", "", "", "", "", "", "", "", None
-    except Exception as e:
-        print(f"Error cargando equipo para edición: {e}")
-        return "", "", "", "", "", "", "", "", None
+    except Exception: return "", "", "", "", "", "", "", "", None
 
-def guardar_edicion_equipo(serie_combo, serie_nueva, marca_nueva, modelo_nuevo, nuevo_estado, nuevo_tipo,
-                            nuevo_proveedor, nuevo_nombre_comercial, nuevas_observaciones, custodio_nuevo,
-                            request: gr.Request):
-    usuario = request.username if request else "Sistema"
-    if not serie_combo: return "⚠️ Selecciona un equipo."
-    serie_limpia = serie_combo.split(" - ")[0].strip()
-    serie_nueva_limpia = (serie_nueva or "").strip()
-    nuevo_proveedor_limpio = (nuevo_proveedor or "").strip()
-    nuevo_nombre_comercial_limpio = (nuevo_nombre_comercial or "").strip()
-
-    if not serie_nueva_limpia:
-        return "⚠️ El Número de Serie no puede quedar vacío."
+def guardar_edicion_equipo(s_combo, s_n, m_n, mod_n, est_n, tip_n, p_n, nc_n, obs_n, c_n, request: gr.Request):
+    if not s_combo: return "⚠️ Selecciona equipo."
+    s_l = s_combo.split(" - ")[0].strip()
+    s_nl = (s_n or "").strip()
+    if not s_nl: return "⚠️ Serie no puede quedar vacía."
 
     try:
-        res_eq = supabase.table("equipos").select("id, orden_id, funcionario_id, ordenes_compra(razon_social_proveedor, nombre_comercial)").ilike("numero_serie", f"{serie_limpia}%").execute()
-        if not res_eq.data:
-            return "❌ Equipo no encontrado."
+        res_eq = supabase.table("equipos").select("id, orden_id, ordenes_compra(razon_social_proveedor, nombre_comercial)").ilike("numero_serie", f"{s_l}%").execute()
+        if not res_eq.data: return "❌ Equipo no encontrado."
 
-        equipo_id = res_eq.data[0]['id']
-        orden_id_actual = res_eq.data[0].get("orden_id")
-        ord_data = res_eq.data[0].get("ordenes_compra")
-        
-        if isinstance(ord_data, list) and ord_data:
-            ord_data = ord_data[0]
-        elif not isinstance(ord_data, dict):
-            ord_data = {}
-            
-        proveedor_actual = (ord_data.get("razon_social_proveedor", "") or "").strip()
-        nombre_comercial_actual = (ord_data.get("nombre_comercial", "") or "").strip()
+        e_id = res_eq.data[0]['id']
+        ord_d = res_eq.data[0].get("ordenes_compra")
+        if isinstance(ord_d, list) and ord_d: ord_d = ord_d[0]
+        elif not isinstance(ord_d, dict): ord_d = {}
 
-        if serie_nueva_limpia != serie_limpia:
-            res_dup = supabase.table("equipos").select("id").eq("numero_serie", serie_nueva_limpia).execute()
-            if res_dup.data:
-                return f"❌ Error: Ya existe otro equipo registrado con la serie '{serie_nueva_limpia}'."
+        if s_nl != s_l:
+            if supabase.table("equipos").select("id").eq("numero_serie", s_nl).execute().data: return f"❌ Ya existe serie '{s_nl}'."
 
-        datos_actualizar_equipo = {
-            "numero_serie": serie_nueva_limpia,
-            "estado": nuevo_estado, 
-            "tipo_equipo": nuevo_tipo,
-            "marca": marca_nueva,
-            "modelo": modelo_nuevo,
-            "observaciones": nuevas_observaciones
-        }
-        mensaje_extra = ""
+        d_act = {"numero_serie": s_nl, "estado": est_n, "tipo_equipo": tip_n, "marca": m_n, "modelo": mod_n, "observaciones": obs_n}
+        m_ext = ""
 
-        if custodio_nuevo:
-            custodio_str = str(custodio_nuevo).strip()
-            if custodio_str == "Sin Asignar - BODEGA":
-                datos_actualizar_equipo["funcionario_id"] = None
+        if c_n:
+            if str(c_n).strip() == "Sin Asignar - BODEGA": d_act["funcionario_id"] = None
             else:
-                cedula_nueva = custodio_str.split(" - ")[-1].strip()
-                res_func = supabase.table("funcionarios").select("id").eq("cedula", cedula_nueva).execute()
-                if res_func.data:
-                    datos_actualizar_equipo["funcionario_id"] = res_func.data[0]["id"]
-                else:
-                    mensaje_extra += " (⚠️ Custodio no encontrado, no se cambió la asignación)."
+                r_f = supabase.table("funcionarios").select("id").eq("cedula", str(c_n).strip().split(" - ")[-1].strip()).execute()
+                if r_f.data: d_act["funcionario_id"] = r_f.data[0]["id"]
 
-        if (nuevo_proveedor_limpio and nuevo_proveedor_limpio != proveedor_actual) or (nuevo_nombre_comercial_limpio and nuevo_nombre_comercial_limpio != nombre_comercial_actual):
-            identificador_unico = f"INDIV-{serie_nueva_limpia}"
-            res_indiv = supabase.table("ordenes_compra").select("id").eq("numero_proceso_sercop", identificador_unico).execute()
-            
-            if res_indiv.data:
-                orden_nueva_id = res_indiv.data[0]["id"]
-                supabase.table("ordenes_compra").update({
-                    "razon_social_proveedor": nuevo_proveedor_limpio,
-                    "nombre_comercial": nuevo_nombre_comercial_limpio
-                }).eq("id", orden_nueva_id).execute()
+        p_nl, nc_nl = (p_n or "").strip(), (nc_n or "").strip()
+        p_act, nc_act = (ord_d.get("razon_social_proveedor", "") or "").strip(), (ord_d.get("nombre_comercial", "") or "").strip()
+
+        if (p_nl and p_nl != p_act) or (nc_nl and nc_nl != nc_act):
+            id_u = f"INDIV-{s_nl}"
+            r_ind = supabase.table("ordenes_compra").select("id").eq("numero_proceso_sercop", id_u).execute()
+            if r_ind.data:
+                o_nid = r_ind.data[0]["id"]
+                supabase.table("ordenes_compra").update({"razon_social_proveedor": p_nl, "nombre_comercial": nc_nl}).eq("id", o_nid).execute()
             else:
-                nueva_orden = {
-                    "numero_proceso_sercop": identificador_unico,
-                    "numero_orden_compra": "Independiente",
-                    "razon_social_proveedor": nuevo_proveedor_limpio,
-                    "nombre_comercial": nuevo_nombre_comercial_limpio,
-                    "objeto_contratacion": "Separación individual de equipo",
-                    "monto": 0.0,
-                    "fecha_adquisicion": "2023-01-01"
-                }
-                res_insert = supabase.table("ordenes_compra").insert(nueva_orden).execute()
-                orden_nueva_id = res_insert.data[0]["id"]
+                o_nid = supabase.table("ordenes_compra").insert({"numero_proceso_sercop": id_u, "numero_orden_compra": "Independiente", "razon_social_proveedor": p_nl, "nombre_comercial": nc_nl, "objeto_contratacion": "Separación", "monto": 0.0, "fecha_adquisicion": "2023-01-01"}).execute().data[0]["id"]
+            d_act["orden_id"] = o_nid
+            m_ext += " (Prov. independizado)."
 
-            datos_actualizar_equipo["orden_id"] = orden_nueva_id
-            mensaje_extra += " (Proveedor/Nombre Comercial independizado solo para este equipo)."
+        supabase.table("equipos").update(d_act).eq("id", e_id).execute()
+        if s_nl != s_l: supabase.table("mantenimientos").update({"numero_serie": s_nl}).ilike("numero_serie", f"{s_l}%").execute()
 
-        supabase.table("equipos").update(datos_actualizar_equipo).eq("id", equipo_id).execute()
+        registrar_auditoria(request.username if request else "Sistema", f"Editó equipo {s_l}.")
+        return f"✅ Guardado.{m_ext}"
+    except Exception as e: return f"❌ Error: {e}"
 
-        if serie_nueva_limpia != serie_limpia:
-            supabase.table("mantenimientos").update({"numero_serie": serie_nueva_limpia}).ilike("numero_serie", f"{serie_limpia}%").execute()
-            mensaje_extra += " (Serie actualizada también en historiales)."
-
-        registrar_auditoria(usuario, f"Editó datos completos del equipo {serie_limpia} (Serie/Marca/Modelo/Estado/Tipo/Custodio/Proveedor/Observaciones).")
-        return f"✅ Guardado.{mensaje_extra}"
-
-    except Exception as e:
-        return f"❌ Error: {e}"
-
-def generar_reporte_personalizado(orden, custodio, columnas, formato):
-    datos_completos = cargar_datos_inventario("", as_styled=False)
-    headers_completos = ["Equipo", "Marca/Modelo", "Nº Serie", "Custodio Asignado", "Área/Dirección", "Estado", "Orden de Compra", "Proceso SERCOP", "Proveedor", "Nombre Comercial", "Observaciones"]
+def generar_reporte_personalizado(o, c, col, formato):
+    d = cargar_datos_inventario("")
+    h_c = ["Equipo", "Marca/Modelo", "Nº Serie", "Custodio Asignado", "Área/Dirección", "Estado", "Orden de Compra", "Proceso SERCOP", "Proveedor", "Nombre Comercial", "Observaciones"]
+    if not col: return gr.update(visible=False, value=None), "⚠️ Selecciona columnas."
+    d_f = []
+    for f in d:
+        if f[0] == "-": continue
+        if o and o.lower() not in (str(f[6]) + str(f[7])).lower(): continue
+        if c and c.lower() not in (str(f[3]) + str(f[4])).lower(): continue
+        d_f.append([f[h_c.index(x)] for x in col])
+    if not d_f: return gr.update(visible=False, value=None), "⚠️ Sin resultados."
     
-    if not columnas:
-        return gr.update(visible=False, value=None), "⚠️ Selecciona al menos una columna para imprimir."
-        
-    datos_filtrados = []
-    for fila in datos_completos:
-        if fila[0] == "-" and fila[1] == "-" and fila[2] == "Sin resultados": continue
-        
-        orden_str = (str(fila[6]) + " " + str(fila[7])).lower()
-        custodio_str = (str(fila[3]) + " " + str(fila[4])).lower()
-        
-        if orden and orden.lower() not in orden_str:
-            continue
-        if custodio and custodio.lower() not in custodio_str:
-            continue
-            
-        fila_filtrada = [fila[headers_completos.index(col)] for col in columnas]
-        datos_filtrados.append(fila_filtrada)
-        
-    if not datos_filtrados:
-        return gr.update(visible=False, value=None), "⚠️ No se encontraron resultados con esos filtros."
-        
-    temp_dir = tempfile.gettempdir()
-    fecha_str = datetime.now().strftime("%Y%m%d_%H%M%S")
-    
+    td = tempfile.gettempdir()
+    fs = datetime.now().strftime("%Y%m%d_%H%M%S")
     try:
         if formato == "excel":
-            ruta_excel = os.path.join(temp_dir, f"Reporte_Inventario_{fecha_str}.xlsx")
-            df_reporte = pd.DataFrame(datos_filtrados, columns=columnas)
-            df_reporte.to_excel(ruta_excel, index=False)
-            return gr.update(value=ruta_excel, visible=True), "✅ Reporte Excel generado exitosamente."
-            
+            ruta = os.path.join(td, f"Reporte_{fs}.xlsx")
+            pd.DataFrame(d_f, columns=col).to_excel(ruta, index=False)
+            return gr.update(value=ruta, visible=True), "✅ Excel generado."
         elif formato == "pdf":
-            ruta_pdf = os.path.join(temp_dir, f"Reporte_Inventario_{fecha_str}.pdf")
+            ruta = os.path.join(td, f"Reporte_{fs}.pdf")
             pdf = FPDF(orientation='L', unit='mm', format='A4')
-            pdf.add_page()
-            
-            def limpiar(t):
-                reemplazos = {'●': '-', '•': '-', '·': '-', '◦': '-', '→': '->', '←': '<-', '✓': 'OK', '✗': 'X', '\u2019': "'", '\u2018': "'", '\u201c': '"', '\u201d': '"', '\u2013': '-', '\u2014': '--', '\u2026': '...'}
-                t_str = str(t)
-                for orig, rem in reemplazos.items(): t_str = t_str.replace(orig, rem)
-                return t_str.encode('latin-1', 'replace').decode('latin-1')
-
-            pdf.set_font("Arial", 'B', 14)
-            pdf.set_fill_color(44, 62, 80)
-            pdf.set_text_color(255, 255, 255)
-            pdf.cell(0, 12, limpiar("REPORTE AVANZADO DE INVENTARIO Y ASIGNACIONES"), ln=True, align='C', fill=True)
-            pdf.ln(5)
-            
-            pesos = {"Equipo": 1.5, "Marca/Modelo": 2.0, "Nº Serie": 1.5, "Custodio Asignado": 2.5, "Área/Dirección": 2.0, "Estado": 1.0, "Orden de Compra": 1.5, "Proceso SERCOP": 1.5, "Proveedor": 2.0, "Nombre Comercial": 1.5, "Observaciones": 2.0}
-            peso_total = sum(pesos[c] for c in columnas)
-            anchos = [(pesos[c] / peso_total) * 277 for c in columnas]
-            
+            pdf.add_page(); pdf.set_font("Arial", 'B', 14); pdf.cell(0, 12, "REPORTE INVENTARIO", ln=True, align='C')
+            def l(t):
+                ts = str(t)
+                for og, rem in {'●':'-','✓':'OK','✗':'X'}.items(): ts = ts.replace(og, rem)
+                return ts.encode('latin-1', 'replace').decode('latin-1')
+            ps = {"Equipo": 1.5, "Marca/Modelo": 2.0, "Nº Serie": 1.5, "Custodio Asignado": 2.5, "Área/Dirección": 2.0, "Estado": 1.0, "Orden de Compra": 1.5, "Proceso SERCOP": 1.5, "Proveedor": 2.0, "Nombre Comercial": 2.0, "Observaciones": 3.0}
+            pt = sum(ps[x] for x in col); anchos = [(ps[x]/pt)*277 for x in col]
             pdf.set_font("Arial", 'B', 8)
-            pdf.set_fill_color(220, 230, 241)
-            pdf.set_text_color(0, 0, 0)
-            for i, col in enumerate(columnas):
-                pdf.cell(anchos[i], 8, limpiar(col), border=1, align='C', fill=True)
+            for i, x in enumerate(col): pdf.cell(anchos[i], 8, l(x), 1, 0, 'C')
             pdf.ln()
-            
             pdf.set_font("Arial", '', 7)
-            for fila in datos_filtrados:
-                for i, item in enumerate(fila):
-                    texto = limpiar(item)
-                    max_chars = int(anchos[i] / 1.5)
-                    if len(texto) > max_chars: texto = texto[:max_chars-2] + ".."
-                    pdf.cell(anchos[i], 6, texto, border=1)
+            for f in d_f:
+                for i, it in enumerate(f):
+                    txt = l(it)
+                    mc = int(anchos[i]/1.5)
+                    pdf.cell(anchos[i], 6, txt[:mc-2]+".." if len(txt)>mc else txt, 1)
                 pdf.ln()
-                
-            pdf.output(ruta_pdf)
-            return gr.update(value=ruta_pdf, visible=True), "✅ Reporte PDF generado exitosamente."
-    except Exception as e:
-        return gr.update(visible=False, value=None), f"❌ Error al generar reporte: {e}"
+            pdf.output(ruta)
+            return gr.update(value=ruta, visible=True), "✅ PDF generado."
+    except Exception as e: return gr.update(visible=False, value=None), f"❌ Error: {e}"
 
-def exportar_pdf_inv(orden, custodio, columnas): return generar_reporte_personalizado(orden, custodio, columnas, "pdf")
-def exportar_excel_inv(orden, custodio, columnas): return generar_reporte_personalizado(orden, custodio, columnas, "excel")
+def exportar_pdf_inv(o, c, col): return generar_reporte_personalizado(o, c, col, "pdf")
+def exportar_excel_inv(o, c, col): return generar_reporte_personalizado(o, c, col, "excel")
 
-# --- 4. INTERFAZ APO (UI CONSTRUCCIÓN) ---
+def cargar_todo_ui():
+    return (cargar_datos_inventario(), obtener_series_disponibles(), obtener_funcionarios(), obtener_series_asignadas(), obtener_todas_las_series(), cargar_listado_funcionarios(), obtener_funcionarios(), obtener_usuarios_lista(), obtener_funcionarios_mantenimiento())
+
+def inicializar_sistema_completo(request: gr.Request):
+    ea = False
+    try:
+        r = supabase.table("usuarios_sistema").select("rol").eq("usuario", request.username if request else "").execute()
+        if r.data and r.data[0].get('rol') == 'admin': ea = True
+    except: pass
+    return (cargar_datos_auditoria(), cargar_usuarios_sistema(), cargar_datos_inventario(), obtener_series_disponibles(), obtener_funcionarios(), obtener_series_asignadas(), obtener_todas_las_series(), cargar_listado_funcionarios(), obtener_funcionarios(), obtener_usuarios_lista(), obtener_funcionarios_mantenimiento(), gr.update(visible=ea), gr.update(visible=not ea))
+
+def seleccionar_funcionario_tabla(evt: gr.SelectData, tab):
+    try:
+        c, n = str(tab.iloc[evt.index[0], 0]), str(tab.iloc[evt.index[0], 1])
+        return c, n, str(tab.iloc[evt.index[0], 2]), str(tab.iloc[evt.index[0], 3]), f"{n} - {c}"
+    except: return "", "", "", "", None
+
+def seleccionar_usuario_tabla(evt: gr.SelectData, tab):
+    try:
+        u, r = str(tab.iloc[evt.index[0], 0]), str(tab.iloc[evt.index[0], 1]).lower()
+        return u, r if r in ["admin", "operador"] else "admin", f"{u} - {r}"
+    except: return "", "admin", None
+
+def seleccionar_inventario_tabla(evt: gr.SelectData, tab):
+    try:
+        if tab is None or len(tab) == 0: return None, "", "", None
+        f = evt.index[0]
+        if isinstance(tab, pd.DataFrame): t, s, c, e = str(tab.iloc[f, 0]), str(tab.iloc[f, 2]), str(tab.iloc[f, 3]), str(tab.iloc[f, 5])
+        else: t, s, c, e = str(tab[f][0]), str(tab[f][2]), str(tab[f][3]), str(tab[f][5])
+        return f"{s} - {t}", e, t, (f"{s} - {t} ({c})" if c != "Sin Asignar" else None)
+    except: return None, "", "", None
+
+def cargar_datos_funcionario_form(combo):
+    if not combo: return "", "", "", ""
+    r = supabase.table("funcionarios").select("*").eq("cedula", str(combo).split(" - ")[-1].strip()).execute()
+    if r.data: f = r.data[0]; return f.get("cedula",""), f.get("nombres_completos",""), f.get("cargo",""), f.get("departamento","")
+    return "", "", "", ""
+
+def cargar_datos_usuario_form(combo):
+    if not combo: return "", "admin"
+    res = supabase.table("usuarios_sistema").select("*").eq("usuario", str(combo).split(" - ")[0].strip()).execute()
+    if res.data: return res.data[0].get("usuario",""), res.data[0].get("rol","admin")
+    return "", "admin"
+
+def advertencia_asignacion(c):
+    if not c: return ""
+    try:
+        rf = supabase.table("funcionarios").select("id").eq("cedula", c.split(" - ")[-1]).execute()
+        if rf.data:
+            re = supabase.table("equipos").select("tipo_equipo").eq("funcionario_id", rf.data[0]['id']).execute()
+            if len(re.data) > 0: return f"⚠️ ADVERTENCIA: Esta persona ya tiene {len(re.data)} equipo(s)."
+        return "ℹ️ Sin equipos asignados."
+    except: return ""
+
+def eliminar_funcionario(c, request: gr.Request):
+    cl = c.strip() if c else ""
+    if not cl: return "⚠️ Debes ingresar la cédula.", obtener_funcionarios(), cargar_listado_funcionarios(), obtener_funcionarios()
+    try:
+        rf = supabase.table("funcionarios").select("id, nombres_completos").eq("cedula", cl).execute()
+        if not rf.data: return "⚠️ No encontrado.", obtener_funcionarios(), cargar_listado_funcionarios(), obtener_funcionarios()
+        fid, n = rf.data[0]['id'], rf.data[0]['nombres_completos']
+        
+        re = supabase.table("equipos").select("numero_serie, tipo_equipo, marca").eq("funcionario_id", fid).execute()
+        if re.data and len(re.data) > 0: return f"❌ ALERTA: No se puede eliminar a {n} porque tiene {len(re.data)} equipo(s). Libéralos primero.", obtener_funcionarios(), cargar_listado_funcionarios(), obtener_funcionarios()
+
+        supabase.table("funcionarios").delete().eq("cedula", cl).execute()
+        registrar_auditoria(request.username if request else "Sistema", f"Eliminó funcionario: {n}")
+        return f"🗑️ {n} eliminado.", obtener_funcionarios(), cargar_listado_funcionarios(), obtener_funcionarios()
+    except Exception as e: return f"❌ Error: {e}", obtener_funcionarios(), cargar_listado_funcionarios(), obtener_funcionarios()
+
+def registrar_y_actualizar(c, n, car, d, request: gr.Request):
+    cl = c.strip()
+    if not cl or not n: return "⚠️ Faltan datos.", obtener_funcionarios(), cargar_listado_funcionarios(), obtener_funcionarios()
+    try:
+        r = supabase.table("funcionarios").select("id").eq("cedula", cl).execute()
+        if r.data:
+            supabase.table("funcionarios").update({"nombres_completos": n, "cargo": car, "departamento": d}).eq("cedula", cl).execute()
+            msg = "✅ Actualizado."
+        else:
+            supabase.table("funcionarios").insert({"cedula": cl, "nombres_completos": n, "cargo": car, "departamento": d}).execute()
+            msg = "✅ Creado."
+        registrar_auditoria(request.username if request else "Sistema", f"Funcionario {n}.")
+        return msg, obtener_funcionarios(), cargar_listado_funcionarios(), obtener_funcionarios()
+    except Exception as e: return f"❌ Error: {e}", obtener_funcionarios(), cargar_listado_funcionarios(), obtener_funcionarios()
+
+def asignar_custodio_equipo(s_c, f_c, gar, request: gr.Request):
+    if not s_c or not f_c: return "⚠️ Faltan selecciones.", cargar_datos_inventario(), obtener_series_disponibles(), obtener_funcionarios(), obtener_series_asignadas()
+    s_l, cl, nom = s_c.split(" - ")[0].strip(), f_c.split(" - ")[-1].strip(), f_c.split(" - ")[0].strip()
+    try:
+        rf = supabase.table("funcionarios").select("id").eq("cedula", cl).execute()
+        if not rf.data: return "❌ Funcionario no encontrado.", cargar_datos_inventario(), obtener_series_disponibles(), obtener_funcionarios(), obtener_series_asignadas()
+            
+        supabase.table("equipos").update({"funcionario_id": rf.data[0]['id']}).eq("numero_serie", s_l).execute()
+        m = f"✅ Equipo {s_l} asignado a {nom}."
+        if gar: m += f"\n📜 GARANTÍA:\n{llamar_gemini_con_reintentos(f'Extrae garantia: {''.join(p.extract_text() for p in PdfReader(gar).pages)}').text.strip()}"
+        registrar_auditoria(request.username if request else "Sistema", f"Asignó {s_l} a {nom}.")
+        return m, cargar_datos_inventario(), obtener_series_disponibles(), obtener_funcionarios(), obtener_series_asignadas()
+    except Exception as e: return f"❌ Error: {e}", cargar_datos_inventario(), obtener_series_disponibles(), obtener_funcionarios(), obtener_series_asignadas()
+
+def liberar_equipo(s_c, request: gr.Request):
+    if not s_c: return "⚠️ Selecciona.", cargar_datos_inventario(), obtener_series_disponibles(), obtener_series_asignadas()
+    s_l = s_c.split(" - ")[0].strip()
+    try:
+        supabase.table("equipos").update({"funcionario_id": None}).eq("numero_serie", s_l).execute()
+        registrar_auditoria(request.username if request else "Sistema", f"Liberó {s_l}.")
+        return f"🔓 {s_l} liberado.", cargar_datos_inventario(), obtener_series_disponibles(), obtener_series_asignadas()
+    except Exception as e: return f"❌ Error: {e}", cargar_datos_inventario(), obtener_series_disponibles(), obtener_series_asignadas()
+
+def eliminar_equipo_inventario(s_c, m, request: gr.Request):
+    if not s_c: return "⚠️ Selecciona.", cargar_datos_inventario(), obtener_series_disponibles(), obtener_series_asignadas(), obtener_todas_las_series(), cargar_datos_auditoria(), gr.update()
+    if not m or not str(m).strip(): return "⚠️ Motivo obligatorio.", cargar_datos_inventario(), obtener_series_disponibles(), obtener_series_asignadas(), obtener_todas_las_series(), cargar_datos_auditoria(), gr.update()
+    s_l = str(s_c).split(" - ")[0].strip()
+    try:
+        re = supabase.table("equipos").select("id, numero_serie, observaciones, funcionario_id").ilike("numero_serie", f"{s_l}%").execute()
+        if not re.data: return f"❌ {s_l} no encontrado.", cargar_datos_inventario(), obtener_series_disponibles(), obtener_series_asignadas(), obtener_todas_las_series(), cargar_datos_auditoria(), gr.update()
+        if re.data[0].get("funcionario_id") is not None: return f"❌ Libera primero a {re.data[0]['numero_serie']}.", cargar_datos_inventario(), obtener_series_disponibles(), obtener_series_asignadas(), obtener_todas_las_series(), cargar_datos_auditoria(), gr.update()
+        
+        n_o = f"[ELIMINADO: {str(m).strip()}] {(re.data[0].get('observaciones') or '')}".strip()
+        supabase.table("equipos").update({"estado": "De Baja", "observaciones": n_o, "funcionario_id": None}).eq("id", re.data[0]["id"]).execute()
+        registrar_auditoria(request.username if request else "Sistema", f"Dio de baja {re.data[0]['numero_serie']}.")
+        return f"🗑️ {re.data[0]['numero_serie']} de baja.", cargar_datos_inventario(), obtener_series_disponibles(), obtener_series_asignadas(), obtener_todas_las_series(), cargar_datos_auditoria(), gr.update(value="")
+    except Exception as e: return f"❌ Error: {e}", cargar_datos_inventario(), obtener_series_disponibles(), obtener_series_asignadas(), obtener_todas_las_series(), cargar_datos_auditoria(), gr.update()
+
+
 with gr.Blocks() as erp_interfaz:
-    
     with gr.Row():
         gr.Markdown("<h1 style='text-align: left; width: 80%; color: #2c3e50; margin-left: 10px;'>🏛️ Sistema Integrado de Contratación y Vigencia Tecnológica</h1>")
         btn_logout = gr.Button("🚪 Cerrar Sesión", variant="stop", scale=1)
     
     with gr.Tabs():
-        
         with gr.TabItem("1. Análisis Precontractual"):
             gr.Markdown("### 🧠 Auditoría Inteligente de Pliegos y TDRs")
             with gr.Row():
@@ -1805,17 +1047,9 @@ with gr.Blocks() as erp_interfaz:
                         with gr.Accordion("1. Ingreso Automático (Acta PDF)", open=False):
                             acta_input = gr.File(label="Subir Acta (PDF)", type="filepath")
                             btn_analizar_acta = gr.Button("1. Extraer y Previsualizar Datos", variant="secondary")
-                            
-                            tabla_preview_acta = gr.Dataframe(
-                                headers=["Tipo", "Marca", "Modelo", "Serie", "Proveedor", "Nombre Comercial", "Orden de Compra", "Proceso SERCOP", "Observaciones"],
-                                column_widths=["100px", "100px", "100px", "120px", "150px", "150px", "130px", "150px", "250px"],
-                                interactive=True,
-                                wrap=True,
-                                label="Vista Previa (Puedes editar los datos directamente en esta tabla antes de guardar)"
-                            )
+                            tabla_preview_acta = gr.Dataframe(headers=["Tipo", "Marca", "Modelo", "Serie", "Proveedor", "Nombre Comercial", "Orden de Compra", "Proceso SERCOP", "Observaciones"], interactive=True, wrap=True)
                             datos_acta_state = gr.State({})
-                            
-                            btn_procesar_acta = gr.Button("2. Confirmar y Guardar en Base de Datos", variant="primary")
+                            btn_procesar_acta = gr.Button("2. Confirmar y Guardar en BD", variant="primary")
                             mensaje_acta = gr.Textbox(label="Estado", interactive=False)
                             
                         with gr.Accordion("2. Ingreso Manual de Equipos", open=False):
@@ -1834,12 +1068,10 @@ with gr.Blocks() as erp_interfaz:
                             mensaje_manual = gr.Textbox(label="Estado", interactive=False)
 
                     with gr.Group():
-                        gr.Markdown("#### 👤 Gestión de Personal (Funcionarios)")
+                        gr.Markdown("#### 👤 Gestión de Personal")
                         with gr.Accordion("3. Listado e Ingreso de Personal", open=False):
-                            gr.Markdown("**🔍 Ver o Editar Funcionario Existente:**")
                             buscar_func_combo = gr.Dropdown(label="Buscar Funcionario Registrado", choices=[], interactive=True)
-                            gr.Markdown("---")
-                            cedula_in = gr.Textbox(label="Código del GAD (Identificador Único)")
+                            cedula_in = gr.Textbox(label="Código del GAD (Cédula)")
                             nombres_in = gr.Textbox(label="Nombres Completos")
                             cargo_in = gr.Textbox(label="Cargo")
                             depto_in = gr.Textbox(label="Departamento")
@@ -1862,55 +1094,40 @@ with gr.Blocks() as erp_interfaz:
                         
                         with gr.Accordion("5. Asignación Masiva (Excel)", open=False):
                             excel_input = gr.File(label="Subir Listado (.xlsx)", type="filepath")
-                            btn_analizar_excel = gr.Button("1. Analizar y Previsualizar Datos", variant="secondary")
-                            
-                            tabla_preview = gr.Dataframe(
-                                headers=["Nº Serie Exacta", "Código del GAD Final", "Nombres", "Cargo", "Departamento", "Validación"], 
-                                interactive=True, 
-                                wrap=True,
-                                label="Vista Previa (Puedes editar y corregir las celdas directamente aquí antes de confirmar)"
-                            )
-                            
-                            btn_confirmar_masivo = gr.Button("2. Confirmar y Asignar Equipos", variant="primary")
+                            btn_analizar_excel = gr.Button("1. Analizar", variant="secondary")
+                            tabla_preview = gr.Dataframe(headers=["Nº Serie Exacta", "Código Final", "Nombres", "Cargo", "Departamento", "Validación"], interactive=True, wrap=True)
+                            btn_confirmar_masivo = gr.Button("2. Confirmar y Asignar", variant="primary")
                             mensaje_masivo = gr.Textbox(label="Resultado", interactive=False)
 
                     with gr.Group():
                         gr.Markdown("#### ⚙️ Mantenimiento del Inventario")
-                        with gr.Accordion("6. Edición Masiva y Limpieza de Inventario", open=False):
-                            gr.Markdown("**A. Liberar Equipo a Estado 'Sin Asignar':**")
+                        with gr.Accordion("6. Edición Masiva y Limpieza", open=False):
+                            gr.Markdown("**A. Liberar Equipo ('Sin Asignar'):**")
                             with gr.Row():
                                 serie_liberar = gr.Dropdown(label="Selecciona Equipo Ocupado", choices=[], interactive=True)
                                 btn_liberar = gr.Button("🔓 Liberar Equipo", variant="stop")
                             mensaje_liberar = gr.Textbox(show_label=False, interactive=False)
-
+                            
                             gr.Markdown("---")
-                            gr.Markdown("**A.1 Dar de Baja / Eliminar Equipo del Inventario (solo si está LIBRE):**")
-                            gr.Markdown("*(⚠️ Esta acción marcará el equipo en ROJO (De Baja) y guardará tu motivo en las observaciones del equipo, manteniendo el registro en el historial.)*")
+                            gr.Markdown("**A.1 Dar de Baja / Eliminar Equipo (Solo LIBRES):**")
                             with gr.Row():
                                 serie_eliminar_equipo = gr.Dropdown(label="Selecciona Equipo Libre a Eliminar", choices=[], interactive=True)
-                                motivo_eliminar_equipo = gr.Textbox(label="Motivo de eliminación (Obligatorio)", placeholder="Ej: Equipo obsoleto, perdido, devuelto...")
+                                motivo_eliminar_equipo = gr.Textbox(label="Motivo (Obligatorio)", placeholder="Ej: Obsoleto")
                                 btn_eliminar_equipo = gr.Button("🗑️ Eliminar / Dar de Baja", variant="stop")
                             mensaje_eliminar_equipo = gr.Textbox(show_label=False, interactive=False)
-                            
+
                             gr.Markdown("---")
-                            gr.Markdown("**B. Búsqueda, Edición en Tabla y Eliminación de Duplicados:**")
-                            gr.Markdown("Puedes editar *Nº Serie, Tipo, Marca, Modelo, Estado, Proveedor, Nombre Comercial y Observaciones* directamente en la tabla. Para borrar un registro repetido, escribe **Eliminar** en la columna *Acción*.")
+                            gr.Markdown("**B. Edición en Tabla y Duplicados:**")
                             with gr.Row():
-                                txt_buscar_edicion = gr.Textbox(label="Buscar equipo específico para editar", placeholder="Ej: Serie o Marca")
+                                txt_buscar_edicion = gr.Textbox(label="Buscar equipo a editar")
                                 btn_buscar_edicion = gr.Button("🔍 Buscar", variant="secondary")
-                                btn_buscar_duplicados = gr.Button("⚠️ Buscar Duplicados", variant="stop")
-                                
-                            tabla_edicion = gr.Dataframe(
-                                headers=["ID BD", "Nº Serie", "Tipo", "Marca", "Modelo", "Custodio Asignado", "Área/Dirección", "Estado", "Proveedor", "Nombre Comercial", "Observaciones", "Acción"],
-                                column_widths=["80px", "130px", "100px", "100px", "120px", "150px", "150px", "100px", "150px", "150px", "200px", "100px"],
-                                interactive=True,
-                                wrap=True
-                            )
-                            btn_guardar_edicion_tabla = gr.Button("💾 Confirmar Cambios y Eliminaciones", variant="primary")
-                            mensaje_edicion_tabla = gr.Textbox(label="Estado de Edición", interactive=False)
+                                btn_buscar_duplicados = gr.Button("⚠️ Duplicados", variant="stop")
+                            tabla_edicion = gr.Dataframe(headers=["ID BD", "Nº Serie", "Tipo", "Marca", "Modelo", "Custodio Asignado", "Área/Dirección", "Estado", "Proveedor", "Nombre Comercial", "Observaciones", "Acción"], interactive=True, wrap=True)
+                            btn_guardar_edicion_tabla = gr.Button("💾 Confirmar Cambios", variant="primary")
+                            mensaje_edicion_tabla = gr.Textbox(label="Estado", interactive=False)
                             
                             gr.Markdown("---")
-                            gr.Markdown("**C. Edición Rápida (Formulario) — Edita TODOS los datos del equipo:**")
+                            gr.Markdown("**C. Edición Rápida (Formulario):**")
                             serie_editar = gr.Dropdown(label="Selecciona Cualquier Equipo", choices=[])
                             serie_nueva_editar = gr.Textbox(label="Número de Serie")
                             with gr.Row():
@@ -1930,55 +1147,30 @@ with gr.Blocks() as erp_interfaz:
                     with gr.Group():
                         gr.Markdown("### 🔍 Buscador Universal y Visor de Inventario")
                         with gr.Row():
-                            caja_busqueda = gr.Textbox(label="Buscar por: Serie, Código del GAD, Nombre, Orden o Proveedor", placeholder="Ej. CE-2023... o Toshiba", scale=4)
+                            caja_busqueda = gr.Textbox(label="Buscar por: Serie, Código, Nombre, Orden o Proveedor", scale=4)
                             btn_buscar = gr.Button("🔎 Buscar", variant="primary", scale=1)
                             btn_sincronizar = gr.Button("🔄 Mostrar Todos", scale=1)
-                        
-                        gr.Markdown("*(💡 Tip: Haz clic en cualquier equipo de la tabla para cargarlo en el Acordeón 6 de Edición)*")
-                        tabla_inventario = gr.Dataframe(
-                            headers=["Equipo", "Marca/Modelo", "Nº Serie", "Custodio Asignado", "Área/Dirección", "Estado", "Orden de Compra", "Proceso SERCOP", "Proveedor", "Nombre Comercial", "Observaciones"], 
-                            column_widths=["120px", "150px", "130px", "150px", "150px", "100px", "130px", "150px", "150px", "150px", "250px"],
-                            interactive=False, 
-                            wrap=True
-                        )
+                        tabla_inventario = gr.Dataframe(headers=["Equipo", "Marca/Modelo", "Nº Serie", "Custodio Asignado", "Área/Dirección", "Estado", "Orden de Compra", "Proceso SERCOP", "Proveedor", "Nombre Comercial", "Observaciones"], interactive=False, wrap=True)
 
                     with gr.Group():
                         with gr.Accordion("🖨️ Generar Reporte Personalizado", open=False):
-                            gr.Markdown("Selecciona los filtros y las columnas que deseas imprimir/exportar en tu reporte de inventario.")
                             with gr.Row():
-                                rep_orden = gr.Textbox(label="Filtrar por Orden de Compra o Proceso", placeholder="Ej: CE-2023... (Vacío para listar todos)")
-                                rep_custodio = gr.Textbox(label="Filtrar por Custodio o Área", placeholder="Ej: Juan Perez o IT (Vacío para listar todos)")
-                            
-                            rep_columnas = gr.CheckboxGroup(
-                                choices=["Equipo", "Marca/Modelo", "Nº Serie", "Custodio Asignado", "Área/Dirección", "Estado", "Orden de Compra", "Proceso SERCOP", "Proveedor", "Nombre Comercial", "Observaciones"],
-                                value=["Equipo", "Marca/Modelo", "Nº Serie", "Custodio Asignado", "Área/Dirección", "Estado", "Orden de Compra", "Nombre Comercial"],
-                                label="Selecciona las Columnas a Imprimir"
-                            )
+                                rep_orden = gr.Textbox(label="Filtrar por Orden o Proceso")
+                                rep_custodio = gr.Textbox(label="Filtrar por Custodio o Área")
+                            rep_columnas = gr.CheckboxGroup(choices=["Equipo", "Marca/Modelo", "Nº Serie", "Custodio Asignado", "Área/Dirección", "Estado", "Orden de Compra", "Proceso SERCOP", "Proveedor", "Nombre Comercial", "Observaciones"], value=["Equipo", "Marca/Modelo", "Nº Serie", "Custodio Asignado", "Área/Dirección", "Estado", "Orden de Compra", "Nombre Comercial"], label="Columnas a Imprimir")
                             with gr.Row():
                                 btn_rep_pdf = gr.Button("📄 Descargar PDF", variant="primary")
                                 btn_rep_excel = gr.Button("📊 Descargar Excel", variant="secondary")
-                                
                             rep_mensaje = gr.Textbox(show_label=False, interactive=False)
-                            rep_archivo = gr.File(label="Archivo Reporte Generado", visible=False)
+                            rep_archivo = gr.File(label="Archivo Reporte", visible=False)
 
         with gr.TabItem("3. Gestión de Mantenimientos"):
             gr.Markdown("### 🛠️ Registro Técnico y Generación de Reportes de Mantenimiento")
             with gr.Row():
                 with gr.Column(scale=1):
                     gr.Markdown("#### 📝 Detalles de la Intervención")
-                    
-                    custodio_mantenimiento = gr.Dropdown(
-                        label="1. Funcionario / Ubicación",
-                        choices=[],
-                        interactive=True
-                    )
-                    
-                    serie_mantenimiento = gr.Dropdown(
-                        label="2. Equipo(s) a intervenir",
-                        choices=[],
-                        interactive=True,
-                        multiselect=True
-                    )
+                    custodio_mantenimiento = gr.Dropdown(label="1. Funcionario / Ubicación", choices=[], interactive=True)
+                    serie_mantenimiento = gr.Dropdown(label="2. Equipo(s) a intervenir", choices=[], interactive=True, multiselect=True)
                     
                     with gr.Row():
                         fecha_mantenimiento = gr.Textbox(label="3. Fecha", elem_classes="fecha-calendario", lines=1, max_lines=1)
@@ -1988,23 +1180,14 @@ with gr.Blocks() as erp_interfaz:
                     tecnico_proveedor = gr.Dropdown(label="6. Empresa / Técnico Asignado", choices=[], interactive=True, allow_custom_value=True)
 
                     gr.Markdown("---")
-                    desc_checks = gr.Dropdown(
-                        label="7. Trabajos Realizados",
-                        choices=["Limpieza Interna (Sopleteado/Brocha)", "Reemplazo de Componentes/Periféricos",
-                                 "Actualización de Software/Drivers", "Formateo y Reinstalación de SO",
-                                 "Revisión de Fuente/Voltajes", "Limpieza Lógica de Virus"],
-                        multiselect=True, allow_custom_value=True
-                    )
+                    desc_checks = gr.Dropdown(label="7. Trabajos Realizados", choices=["Limpieza Interna (Sopleteado/Brocha)", "Reemplazo de Componentes/Periféricos", "Actualización de Software/Drivers", "Formateo y Reinstalación de SO", "Revisión de Fuente/Voltajes", "Limpieza Lógica de Virus"], multiselect=True, allow_custom_value=True)
                     desc_mantenimiento = gr.Textbox(label="Detalles adicionales / Observaciones", lines=2)
                     costo_mantenimiento = gr.Number(label="8. Costo Asociado ($)", value=0.0)
 
                     gr.Markdown("---")
-                    fotos_mantenimiento = gr.File(
-                        label="9. Evidencia Fotográfica",
-                        file_count="multiple",
-                        file_types=["image"],
-                        type="filepath"
-                    )
+                    with gr.Row():
+                        fotos_mantenimiento = gr.File(label="9. Evidencia (Subir Archivos)", file_count="multiple", file_types=["image"], type="filepath")
+                        foto_camara = gr.Image(label="📸 Tomar Foto Rápida (Cámara del dispositivo)", sources=["webcam", "upload"], type="filepath")
 
                     gr.Markdown("---")
                     gr.Markdown("#### ✍️ Confirmar Nombres para las Firmas")
@@ -2022,21 +1205,26 @@ with gr.Blocks() as erp_interfaz:
                     registro_eliminar = gr.Dropdown(label="Selecciona Registro (Reporte)", choices=[], interactive=True)
                     with gr.Row():
                         btn_descargar_reporte = gr.Button("📥 Descargar Reporte PDF", variant="secondary")
-                        btn_eliminar_mant = gr.Button("🗑️ Eliminar Registro Seleccionado", variant="stop")
+                        btn_eliminar_mant = gr.Button("🗑️ Eliminar Registro", variant="stop")
                     archivo_reporte_descarga = gr.File(label="📄 Reporte Descargado", visible=False)
                     msg_eliminar = gr.Textbox(show_label=False, interactive=False)
 
+                    with gr.Accordion("✏️ Editar Registro Seleccionado (Planificación)", open=False):
+                        gr.Markdown("*(Nota: Actualiza los datos en la base y el historial, pero no modifica el PDF original ya firmado).*")
+                        with gr.Row():
+                            edit_mant_fecha = gr.Textbox(label="Fecha", elem_classes="fecha-calendario")
+                            edit_mant_proximo = gr.Textbox(label="Próximo Mantenimiento", elem_classes="fecha-calendario")
+                        edit_mant_tipo = gr.Dropdown(label="Tipo de Intervención", choices=["Preventivo", "Correctivo", "Revisión de Garantía", "De Baja", "Diagnóstico"])
+                        edit_mant_tecnico = gr.Textbox(label="Técnico / Proveedor")
+                        edit_mant_desc = gr.Textbox(label="Descripción / Trabajos", lines=3)
+                        edit_mant_costo = gr.Number(label="Costo ($)", value=0.0)
+                        btn_guardar_edicion_mant = gr.Button("💾 Guardar Cambios en el Registro", variant="primary")
+                        msg_edicion_mant = gr.Textbox(show_label=False, interactive=False)
+
                 with gr.Column(scale=2):
-                    gr.Markdown("#### 📋 Historial Técnico Global / Por Funcionario")
-                    with gr.Row():
-                        btn_ver_todo_historial = gr.Button("🔄 Cargar TODO el Historial del Sistema", variant="secondary")
-                    
-                    gr.Markdown("*(Se actualiza al seleccionar un Funcionario, o presiona el botón arriba para ver todos los registros del GAD)*")
-                    
-                    tabla_mantenimientos = gr.Dataframe(
-                        headers=["Fecha", "Tipo", "Responsable", "Equipo(s) Intervenido(s)", "Descripción", "Costo", "Próxima Revisión"],
-                        interactive=False, wrap=True
-                    )
+                    gr.Markdown("#### 📋 Historial Técnico")
+                    gr.Markdown("*(Se actualiza automáticamente al seleccionar el Funcionario/Ubicación)*")
+                    tabla_mantenimientos = gr.Dataframe(headers=["Fecha", "Tipo", "Responsable", "Equipo(s) Intervenido(s)", "Descripción", "Costo", "Próxima Revisión"], interactive=False, wrap=True)
 
         with gr.TabItem("4. Auditoría de Sistema"):
             gr.Markdown("### 🕵️‍♂️ Bitácora Histórica (Inalterable)")
@@ -2071,8 +1259,8 @@ with gr.Blocks() as erp_interfaz:
                         mensaje_clave = gr.Textbox(show_label=False, interactive=False)
                 
                 gr.Markdown("---")
-                gr.Markdown("### 💾 Respaldo y Restauración de Base de Datos")
-                gr.Markdown("Genera descargas periódicas de seguridad o restaura una copia previamente exportada.")
+                gr.Markdown("### 💾 Respaldo de Base de Datos (Backup)")
+                gr.Markdown("Genera descargas periódicas de seguridad de toda la base de datos (JSON) presionando este botón:")
                 with gr.Row():
                     btn_respaldo = gr.Button("⬇️ Generar y Descargar Respaldo Manual", variant="primary")
                 with gr.Row():
@@ -2087,14 +1275,12 @@ with gr.Blocks() as erp_interfaz:
                     btn_restaurar = gr.Button("🔄 Cargar y Restaurar Datos", variant="primary")
                 msg_restaurar = gr.Textbox(show_label=False, interactive=False)
 
-    # =========================================================================================
-    # ======================== SECCIÓN ÚNICA DE EVENTOS (PREVIENE ERRORES) ====================
-    # =========================================================================================
+    # Agrupamos TODOS los eventos al final para evitar errores de tipo NameError (componentes no definidos).
 
     # Eventos Pestaña 1
     btn_analizar.click(fn=analizar_fase_precontractual, inputs=[archivos_input, referencias_input, enlaces_input], outputs=reporte_output)
 
-    # Eventos Pestaña 2 (Inventario y Asignaciones)
+    # Eventos Pestaña 2
     btn_logout.click(fn=None, inputs=None, outputs=None, js="() => { window.location.href = '/logout'; }")
     btn_analizar_acta.click(fn=analizar_acta_pdf, inputs=[acta_input], outputs=[tabla_preview_acta, datos_acta_state, mensaje_acta])
     btn_procesar_acta.click(fn=procesar_acta_recepcion, inputs=[tabla_preview_acta, datos_acta_state], outputs=[mensaje_acta, tabla_inventario, serie_asignar])
@@ -2104,155 +1290,59 @@ with gr.Blocks() as erp_interfaz:
     buscar_func_combo.change(fn=cargar_datos_funcionario_form, inputs=[buscar_func_combo], outputs=[cedula_in, nombres_in, cargo_in, depto_in])
     btn_guardar_func.click(fn=registrar_y_actualizar, inputs=[cedula_in, nombres_in, cargo_in, depto_in], outputs=[mensaje_func, custodio_asignar, tabla_funcionarios, buscar_func_combo])
     btn_limpiar_func.click(fn=lambda: ("", "", "", "", gr.update(value=None)), inputs=[], outputs=[cedula_in, nombres_in, cargo_in, depto_in, buscar_func_combo])
-    
-    btn_eliminar_func.click(
-        fn=eliminar_funcionario, 
-        inputs=[cedula_in], 
-        outputs=[mensaje_func, custodio_asignar, tabla_funcionarios, buscar_func_combo]
-    ).then(
-        fn=lambda: ("", "", "", "", gr.update(value=None)), 
-        inputs=[], 
-        outputs=[cedula_in, nombres_in, cargo_in, depto_in, buscar_func_combo]
-    )
+    btn_eliminar_func.click(fn=eliminar_funcionario, inputs=[cedula_in], outputs=[mensaje_func, custodio_asignar, tabla_funcionarios, buscar_func_combo]).then(fn=lambda: ("", "", "", "", gr.update(value=None)), inputs=[], outputs=[cedula_in, nombres_in, cargo_in, depto_in, buscar_func_combo])
 
     custodio_asignar.change(fn=advertencia_asignacion, inputs=[custodio_asignar], outputs=[alerta_asignacion])
     btn_asignar.click(fn=asignar_custodio_equipo, inputs=[serie_asignar, custodio_asignar, garantia_input], outputs=[mensaje_asignar, tabla_inventario, serie_asignar, custodio_asignar, serie_liberar])
-    
     btn_analizar_excel.click(fn=analizar_excel_masivo, inputs=[excel_input], outputs=[mensaje_masivo, tabla_preview])
-    btn_confirmar_masivo.click(
-        fn=confirmar_asignacion_masiva, inputs=[tabla_preview], outputs=[mensaje_masivo]
-    ).then(
-        fn=cargar_todo_ui, inputs=[],
-        outputs=[tabla_inventario, serie_asignar, custodio_asignar, serie_liberar,
-                 serie_editar, tabla_funcionarios, buscar_func_combo,
-                 buscar_usuario_combo, custodio_mantenimiento]
-    )
+    
+    # ESTOS ERAN LOS BOTONES QUE CAUSABAN EL NameError
+    btn_confirmar_masivo.click(fn=confirmar_asignacion_masiva, inputs=[tabla_preview], outputs=[mensaje_masivo]).then(fn=cargar_todo_ui, inputs=[], outputs=[tabla_inventario, serie_asignar, custodio_asignar, serie_liberar, serie_editar, tabla_funcionarios, buscar_func_combo, buscar_usuario_combo, custodio_mantenimiento])
+    btn_sincronizar.click(fn=cargar_todo_ui, inputs=[], outputs=[tabla_inventario, serie_asignar, custodio_asignar, serie_liberar, serie_editar, tabla_funcionarios, buscar_func_combo, buscar_usuario_combo, custodio_mantenimiento])
 
     tabla_inventario.select(fn=seleccionar_inventario_tabla, inputs=[tabla_inventario], outputs=[serie_editar, estado_editar, tipo_editar, serie_liberar])
     btn_buscar.click(fn=realizar_busqueda, inputs=[caja_busqueda], outputs=[tabla_inventario])
     caja_busqueda.submit(fn=realizar_busqueda, inputs=[caja_busqueda], outputs=[tabla_inventario])
-    btn_sincronizar.click(
-        fn=cargar_todo_ui, inputs=[], 
-        outputs=[tabla_inventario, serie_asignar, custodio_asignar, serie_liberar, serie_editar, tabla_funcionarios, buscar_func_combo, buscar_usuario_combo, custodio_mantenimiento]
-    )
     
     btn_liberar.click(fn=liberar_equipo, inputs=[serie_liberar], outputs=[mensaje_liberar, tabla_inventario, serie_asignar, serie_liberar])
-
-    btn_eliminar_equipo.click(
-        fn=eliminar_equipo_inventario,
-        inputs=[serie_eliminar_equipo, motivo_eliminar_equipo],
-        outputs=[mensaje_eliminar_equipo, tabla_inventario, serie_asignar, serie_liberar, serie_eliminar_equipo, tabla_auditoria, motivo_eliminar_equipo]
-    ).then(
-        fn=obtener_series_disponibles, inputs=[], outputs=[serie_eliminar_equipo]
-    )
+    btn_eliminar_equipo.click(fn=eliminar_equipo_inventario, inputs=[serie_eliminar_equipo, motivo_eliminar_equipo], outputs=[mensaje_eliminar_equipo, tabla_inventario, serie_asignar, serie_liberar, serie_eliminar_equipo, tabla_auditoria, motivo_eliminar_equipo]).then(fn=obtener_series_disponibles, inputs=[], outputs=[serie_eliminar_equipo])
 
     btn_buscar_edicion.click(fn=cargar_tabla_edicion, inputs=[txt_buscar_edicion], outputs=[tabla_edicion])
     btn_buscar_duplicados.click(fn=cargar_duplicados, inputs=[], outputs=[tabla_edicion])
-    btn_guardar_edicion_tabla.click(fn=confirmar_edicion_masiva, inputs=[tabla_edicion], outputs=[mensaje_edicion_tabla]).then(
-        fn=realizar_busqueda, inputs=[caja_busqueda], outputs=[tabla_inventario]
-    )
+    btn_guardar_edicion_tabla.click(fn=confirmar_edicion_masiva, inputs=[tabla_edicion], outputs=[mensaje_edicion_tabla]).then(fn=realizar_busqueda, inputs=[caja_busqueda], outputs=[tabla_inventario])
     
-    serie_editar.change(
-        fn=cargar_equipo_para_edicion,
-        inputs=[serie_editar],
-        outputs=[serie_nueva_editar, marca_editar, modelo_editar, estado_editar, tipo_editar, proveedor_editar, nombre_comercial_editar, observaciones_editar, custodio_editar]
-    )
-    btn_guardar_edicion.click(
-        fn=guardar_edicion_equipo,
-        inputs=[serie_editar, serie_nueva_editar, marca_editar, modelo_editar, estado_editar, tipo_editar, proveedor_editar, nombre_comercial_editar, observaciones_editar, custodio_editar],
-        outputs=[mensaje_edicion]
-    ).then(
-        fn=cargar_todo_ui, inputs=[],
-        outputs=[tabla_inventario, serie_asignar, custodio_asignar, serie_liberar,
-                 serie_editar, tabla_funcionarios, buscar_func_combo,
-                 buscar_usuario_combo, custodio_mantenimiento]
-    ).then(
-        fn=obtener_funcionarios_mantenimiento, inputs=[], outputs=[custodio_editar]
-    )
+    serie_editar.change(fn=cargar_equipo_para_edicion, inputs=[serie_editar], outputs=[serie_nueva_editar, marca_editar, modelo_editar, estado_editar, tipo_editar, proveedor_editar, nombre_comercial_editar, observaciones_editar, custodio_editar])
+    btn_guardar_edicion.click(fn=guardar_edicion_equipo, inputs=[serie_editar, serie_nueva_editar, marca_editar, modelo_editar, estado_editar, tipo_editar, proveedor_editar, nombre_comercial_editar, observaciones_editar, custodio_editar], outputs=[mensaje_edicion]).then(fn=cargar_todo_ui, inputs=[], outputs=[tabla_inventario, serie_asignar, custodio_asignar, serie_liberar, serie_editar, tabla_funcionarios, buscar_func_combo, buscar_usuario_combo, custodio_mantenimiento]).then(fn=obtener_funcionarios_mantenimiento, inputs=[], outputs=[custodio_editar])
 
     btn_rep_pdf.click(fn=exportar_pdf_inv, inputs=[rep_orden, rep_custodio, rep_columnas], outputs=[rep_archivo, rep_mensaje])
     btn_rep_excel.click(fn=exportar_excel_inv, inputs=[rep_orden, rep_custodio, rep_columnas], outputs=[rep_archivo, rep_mensaje])
+    
+    # Eventos Pestaña 3
+    custodio_mantenimiento.change(fn=cargar_equipos_de_funcionario, inputs=[custodio_mantenimiento], outputs=[serie_mantenimiento, nombre_funcionario_firma]).then(fn=cargar_historial_por_funcionario, inputs=[custodio_mantenimiento], outputs=[tabla_mantenimientos]).then(fn=obtener_mantenimientos_lista_por_funcionario, inputs=[custodio_mantenimiento], outputs=[registro_eliminar])
+    
+    serie_mantenimiento.change(fn=auto_completar_mantenimiento, inputs=[serie_mantenimiento], outputs=[tecnico_proveedor])
+    
+    btn_guardar_mantenimiento.click(fn=registrar_y_generar_acta, inputs=[custodio_mantenimiento, serie_mantenimiento, fecha_mantenimiento, tipo_mantenimiento, desc_checks, desc_mantenimiento, tecnico_proveedor, costo_mantenimiento, proximo_mantenimiento, fotos_mantenimiento, foto_camara, nombre_admin_firma, nombre_tecnico_firma, nombre_funcionario_firma], outputs=[msg_mantenimiento, tabla_mantenimientos, archivo_acta_descarga]).then(fn=obtener_mantenimientos_lista_por_funcionario, inputs=[custodio_mantenimiento], outputs=[registro_eliminar])
+    
+    btn_descargar_reporte.click(fn=descargar_reporte_mantenimiento, inputs=[registro_eliminar], outputs=[archivo_reporte_descarga, msg_eliminar])
+    btn_eliminar_mant.click(fn=eliminar_mantenimiento, inputs=[registro_eliminar], outputs=[msg_eliminar]).then(fn=obtener_mantenimientos_lista_por_funcionario, inputs=[custodio_mantenimiento], outputs=[registro_eliminar]).then(fn=cargar_historial_por_funcionario, inputs=[custodio_mantenimiento], outputs=[tabla_mantenimientos])
 
-    # Eventos Pestaña 3 (Mantenimientos)
-    custodio_mantenimiento.change(
-        fn=cargar_equipos_de_funcionario,
-        inputs=[custodio_mantenimiento],
-        outputs=[serie_mantenimiento, nombre_funcionario_firma]
-    ).then(
-        fn=cargar_historial_por_funcionario,
-        inputs=[custodio_mantenimiento],
-        outputs=[tabla_mantenimientos]
-    ).then(
-        fn=obtener_mantenimientos_lista_por_funcionario,
-        inputs=[custodio_mantenimiento],
-        outputs=[registro_eliminar]
-    )
+    registro_eliminar.change(fn=cargar_datos_mantenimiento_edicion, inputs=[registro_eliminar], outputs=[edit_mant_fecha, edit_mant_proximo, edit_mant_tipo, edit_mant_tecnico, edit_mant_desc, edit_mant_costo])
+    btn_guardar_edicion_mant.click(fn=guardar_edicion_mantenimiento, inputs=[registro_eliminar, edit_mant_fecha, edit_mant_tipo, edit_mant_tecnico, edit_mant_desc, edit_mant_costo, edit_mant_proximo], outputs=[msg_edicion_mant]).then(fn=cargar_historial_por_funcionario, inputs=[custodio_mantenimiento], outputs=[tabla_mantenimientos])
 
-    serie_mantenimiento.change(
-        fn=auto_completar_mantenimiento,
-        inputs=[serie_mantenimiento],
-        outputs=[tecnico_proveedor, tabla_mantenimientos]
-    )
-
-    btn_guardar_mantenimiento.click(
-        fn=registrar_y_generar_acta,
-        inputs=[custodio_mantenimiento, serie_mantenimiento, fecha_mantenimiento, tipo_mantenimiento,
-                desc_checks, desc_mantenimiento, tecnico_proveedor,
-                costo_mantenimiento, proximo_mantenimiento, fotos_mantenimiento,
-                nombre_admin_firma, nombre_tecnico_firma, nombre_funcionario_firma],
-        outputs=[msg_mantenimiento, tabla_mantenimientos, archivo_acta_descarga]
-    ).then(
-        fn=obtener_mantenimientos_lista_por_funcionario,
-        inputs=[custodio_mantenimiento],
-        outputs=[registro_eliminar]
-    )
-
-    btn_descargar_reporte.click(
-        fn=descargar_reporte_mantenimiento,
-        inputs=[registro_eliminar],
-        outputs=[archivo_reporte_descarga, msg_eliminar]
-    )
-
-    btn_eliminar_mant.click(
-        fn=eliminar_mantenimiento,
-        inputs=[registro_eliminar],
-        outputs=[msg_eliminar]
-    ).then(
-        fn=obtener_mantenimientos_lista_por_funcionario,
-        inputs=[custodio_mantenimiento],
-        outputs=[registro_eliminar]
-    ).then(
-        fn=cargar_historial_por_funcionario,
-        inputs=[custodio_mantenimiento],
-        outputs=[tabla_mantenimientos]
-    )
-
-    btn_ver_todo_historial.click(
-        fn=cargar_historial_completo,
-        inputs=[],
-        outputs=[tabla_mantenimientos]
-    )
-
-    # Eventos Pestaña 4 y 5 (Auditoría y Seguridad)
+    # Eventos Pestaña 4
     btn_refrescar_auditoria.click(fn=cargar_datos_auditoria, inputs=[], outputs=tabla_auditoria)
+
+    # Eventos Pestaña 5
     btn_respaldo.click(fn=generar_respaldo_manual, inputs=[], outputs=[archivo_respaldo, msg_respaldo])
-    
-    btn_restaurar.click(
-        fn=restaurar_base_datos, 
-        inputs=[archivo_subir_respaldo], 
-        outputs=[msg_restaurar]
-    ).then(
-        fn=cargar_todo_ui, inputs=[], 
-        outputs=[tabla_inventario, serie_asignar, custodio_asignar, serie_liberar, serie_editar, tabla_funcionarios, buscar_func_combo, buscar_usuario_combo, custodio_mantenimiento]
-    )
-    
+    btn_restaurar.click(fn=restaurar_base_datos, inputs=[archivo_subir_respaldo], outputs=[msg_restaurar]).then(fn=cargar_todo_ui, inputs=[], outputs=[tabla_inventario, serie_asignar, custodio_asignar, serie_liberar, serie_editar, tabla_funcionarios, buscar_func_combo, buscar_usuario_combo, custodio_mantenimiento])
+
     tabla_usuarios.select(fn=seleccionar_usuario_tabla, inputs=[tabla_usuarios], outputs=[usuario_db_in, rol_db_in, buscar_usuario_combo])
     buscar_usuario_combo.change(fn=cargar_datos_usuario_form, inputs=[buscar_usuario_combo], outputs=[usuario_db_in, rol_db_in])
     btn_limpiar_usr.click(fn=lambda: ("", "admin", "", gr.update(value=None)), inputs=[], outputs=[usuario_db_in, rol_db_in, clave_db_in, buscar_usuario_combo])
     btn_refrescar_usuarios.click(fn=cargar_usuarios_sistema, inputs=[], outputs=[tabla_usuarios])
     btn_reset_clave.click(fn=gestionar_usuario_admin, inputs=[usuario_db_in, clave_db_in, rol_db_in], outputs=[mensaje_clave, tabla_usuarios, buscar_usuario_combo])
 
-    # Script JS para calendarios
     script_calendario = """
     () => {
         setInterval(() => {
@@ -2276,19 +1366,16 @@ with gr.Blocks() as erp_interfaz:
             tabla_auditoria, tabla_usuarios, tabla_inventario, 
             serie_asignar, custodio_asignar, serie_liberar, 
             serie_editar, tabla_funcionarios, buscar_func_combo, 
-            buscar_usuario_combo, custodio_mantenimiento, panel_seguridad, panel_denegado,
-            custodio_editar
+            buscar_usuario_combo, custodio_mantenimiento, panel_seguridad, panel_denegado
         ],
         js=script_calendario
-    ).then(
-        fn=obtener_series_disponibles, inputs=[], outputs=[serie_eliminar_equipo]
-    )
+    ).then(fn=obtener_series_disponibles, inputs=[], outputs=[serie_eliminar_equipo])
 
-# --- ADAPTACIÓN PARA RENDER Y USO LOCAL ---
 import fastapi
 app = fastapi.FastAPI()
 app = gr.mount_gradio_app(app, erp_interfaz, path="/", auth=verificar_credenciales)
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=10000)
+    # Cambiamos el puerto local a 8000 para evitar el choque con el proceso "fantasma"
+    uvicorn.run(app, host="0.0.0.0", port=8000)
