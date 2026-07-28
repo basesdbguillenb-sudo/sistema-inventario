@@ -1,0 +1,1 @@
+import{G as o,r}from"./i18n-BNqz_7Hf.js";import{M as t,ac as p,O as c}from"./index-DyDV80mF.js";function u(n,s){t(s,!0);let e=r(s,["$$slots","$$events","$$legacy"]);const a=new o(e);p(()=>{a.props.value&&a.dispatch("change")}),c()}export{u as default};
