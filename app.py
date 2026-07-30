@@ -39,7 +39,7 @@ def verificar_credenciales(usuario, clave):
 
 def registrar_auditoria(usuario, accion):
     try:
-        supabase.table("auditoria").insert({"usuario": usuario, "accion": accion}).execute()
+        supabase.table("auditoria_sistema").insert({"usuario": usuario, "accion": accion}).execute()
     except Exception as e: print(f"Error auditoría: {e}")
 
 # ACTUALIZADO: Uso del nuevo cliente de Google GenAI
@@ -71,9 +71,9 @@ def generar_numero_reporte(tecnico_nombre, mid):
 
 def cargar_datos_auditoria():
     try:
-        res = supabase.table("auditoria").select("*").order("fecha", desc=True).limit(100).execute()
+        res = supabase.table("auditoria_sistema").select("*").order("fecha_registro", desc=True).limit(100).execute()
         if not res.data: return [["-", "-", "-"]]
-        return [[r.get('fecha', '').split('.')[0].replace('T', ' '), r.get('usuario', ''), r.get('accion', '')] for r in res.data]
+        return [[r.get('fecha_registro', '').split('.')[0].replace('T', ' '), r.get('usuario', ''), r.get('accion', '')] for r in res.data]
     except Exception as e: return [[f"Error: {e}", "-", "-"]]
 
 def cargar_usuarios_sistema():
@@ -214,24 +214,215 @@ def acumular_foto_camara(foto_actual, lista_estado):
 def limpiar_galeria():
     return [], [], None
 
+# =====================================================================
+# INICIO DE FUNCIONES MAESTRAS PARA DISEÑO DE PDF
+# =====================================================================
+import re
 
+COLOR_HEADER_FILL = (219, 229, 241)
+
+def _l(txt):
+    return str(txt).encode('latin-1', 'replace').decode('latin-1')
+
+def _encabezado_seccion(pdf, titulo):
+    pdf.set_fill_color(*COLOR_HEADER_FILL)
+    pdf.set_text_color(0, 0, 0)
+    pdf.set_font("Arial", 'B', 11)
+    pdf.cell(0, 8, _l(titulo), 0, 1, 'L', fill=True)
+    pdf.ln(2)
+
+def _parsear_descripcion(descripcion):
+    if not descripcion:
+        return [('texto', "Sin descripción.")], "Sin observaciones adicionales."
+
+    partes = re.split(r'(?i)\n*OBSERVACIONES:\s*\n?|\n*CONCLUSIONES Y RECOMENDACIONES:\s*\n?', descripcion, maxsplit=1)
+    cuerpo = partes[0].strip()
+    conclusiones = partes[1].strip() if len(partes) > 1 else "Sin observaciones adicionales."
+
+    bloques_raw = re.split(r'(?i)(MANTENIMIENTO L[ÓO]GICO:|MANTENIMIENTO F[ÍI]SICO:)', cuerpo)
+    trabajos = []
+    if bloques_raw and bloques_raw[0].strip():
+        trabajos.append(('texto', bloques_raw[0].strip()))
+    i = 1
+    while i < len(bloques_raw):
+        header = bloques_raw[i].strip()
+        texto = bloques_raw[i + 1].strip() if i + 1 < len(bloques_raw) else ""
+        trabajos.append(('header', header))
+        if texto:
+            trabajos.append(('texto', texto))
+        i += 2
+    if not trabajos:
+        trabajos = [('texto', cuerpo or "Sin descripción.")]
+    return trabajos, conclusiones
+
+def _escribir_trabajos(pdf, trabajos):
+    for tipo, contenido in trabajos:
+        if tipo == 'header':
+            pdf.set_font("Arial", 'B', 10)
+            pdf.multi_cell(0, 6, _l(contenido), new_x="LMARGIN", new_y="NEXT")
+            pdf.set_font("Arial", '', 10)
+        else:
+            pdf.multi_cell(0, 6, _l(contenido), new_x="LMARGIN", new_y="NEXT")
+    pdf.ln(2)
+
+def _generar_pdf_completo(numero_reporte, fecha, tipo, tecnico, nombre_custodio,
+                           equipos_lista, descripcion, nombre_admin_firma,
+                           nombre_tecnico_firma, nombre_funcionario_firma,
+                           fotos_locales, ruta_salida):
+    pdf = FPDF()
+    pdf.add_page()
+
+    # TÍTULO
+    pdf.set_font("Arial", 'B', 16)
+    pdf.cell(0, 10, _l("REPORTE DE MANTENIMIENTO"), ln=True, align='C')
+    pdf.set_font("Arial", '', 10)
+    pdf.cell(0, 6, _l(f"N. Reporte: {numero_reporte}"), ln=True, align='C')
+    pdf.ln(4)
+
+    # DATOS GENERALES
+    _encabezado_seccion(pdf, "DATOS GENERALES")
+    pdf.set_font("Arial", '', 10)
+    pdf.cell(0, 6, _l(f"Fecha de intervencion: {fecha}"), 0, 1)
+    pdf.cell(0, 6, _l(f"Tipo de Mantenimiento: {tipo}"), 0, 1)
+    pdf.cell(0, 6, _l(f"Empresa / Tecnico: {tecnico or 'No especificado'}"), 0, 1)
+    pdf.cell(0, 6, _l(f"Custodio a cargo: {nombre_custodio}"), 0, 1)
+    pdf.ln(4)
+
+    # EQUIPOS INTERVENIDOS
+    _encabezado_seccion(pdf, "EQUIPOS INTERVENIDOS")
+    pdf.set_font("Arial", '', 10)
+    for eq in equipos_lista:
+        pdf.multi_cell(0, 6, _l(f"- {eq.strip()}"), new_x="LMARGIN", new_y="NEXT")
+    pdf.ln(4)
+
+    # TRABAJOS REALIZADOS
+    _encabezado_seccion(pdf, "TRABAJOS REALIZADOS")
+    pdf.set_font("Arial", '', 10)
+    trabajos, conclusiones = _parsear_descripcion(descripcion)
+    _escribir_trabajos(pdf, trabajos)
+
+    # CONCLUSIONES Y RECOMENDACIONES
+    _encabezado_seccion(pdf, "CONCLUSIONES Y RECOMENDACIONES")
+    pdf.set_font("Arial", '', 10)
+    pdf.multi_cell(0, 6, _l(conclusiones), new_x="LMARGIN", new_y="NEXT")
+    pdf.ln(4)
+
+    # FIRMAS DE CONFORMIDAD
+    _encabezado_seccion(pdf, "FIRMAS DE CONFORMIDAD")
+    pdf.ln(6)
+    w = 63
+    nombres = [
+        str(nombre_admin_firma or "Administrador").strip(),
+        str(nombre_funcionario_firma or nombre_custodio).strip(),
+        str(nombre_tecnico_firma or tecnico or "Técnico").strip(),
+    ]
+    roles = ["Administrador", "Funcionario", "Tecnico"]
+
+    y_start = pdf.get_y()
+    pdf.set_font("Arial", 'B', 10)
+    y_max = y_start
+    for i, nom in enumerate(nombres):
+        x = pdf.l_margin + i * w
+        pdf.set_xy(x, y_start)
+        pdf.multi_cell(w, 5, _l(nom), align='C', new_x="LMARGIN", new_y="LAST")
+        if pdf.get_y() > y_max:
+            y_max = pdf.get_y()
+
+    y_roles = y_max + 4
+    pdf.set_font("Arial", '', 9)
+    for i, rol in enumerate(roles):
+        x = pdf.l_margin + i * w
+        pdf.set_xy(x, y_roles)
+        pdf.multi_cell(w, 5, _l(rol), align='C', new_x="LMARGIN", new_y="LAST")
+
+    pdf.set_xy(pdf.l_margin, y_roles + 8)
+
+    if fotos_locales:
+        pdf.set_font("Arial", 'I', 9)
+        pdf.multi_cell(0, 6, _l("* Nota aclaratoria: Adjunto a este documento se encuentra el respaldo fotografico del presente servicio."), new_x="LMARGIN", new_y="NEXT")
+
+        pdf.add_page()
+        _encabezado_seccion(pdf, "REGISTRO FOTOGRAFICO")
+
+        y_offset = pdf.get_y()
+        max_img_width = 180
+        max_img_height = 110
+
+        for idx, fp in enumerate(fotos_locales):
+            try:
+                img = Image.open(fp)
+                if img.mode == 'RGBA':
+                    img = img.convert('RGB')
+
+                with tempfile.NamedTemporaryFile(delete=False, suffix='.jpg') as tmp:
+                    img.save(tmp.name, 'JPEG', quality=85)
+                    tmp_path = tmp.name
+
+                img_w, img_h = img.size
+                ratio = min(max_img_width / img_w, max_img_height / img_h)
+                new_w = img_w * ratio
+                new_h = img_h * ratio
+
+                if y_offset + new_h > 280:
+                    pdf.add_page()
+                    y_offset = 20
+
+                center_x = (210 - new_w) / 2
+                pdf.image(tmp_path, x=center_x, y=y_offset, w=new_w, h=new_h)
+                y_offset += new_h + 10
+
+                pdf.set_y(y_offset)
+                pdf.set_font("Arial", 'I', 9)
+                pdf.cell(0, 5, _l(f"Evidencia {idx + 1}"), 0, 1, 'C')
+                y_offset += 10
+
+                try:
+                    os.remove(tmp_path)
+                except:
+                    pass
+            except Exception as ex:
+                print(f"Error insertando foto {fp}: {ex}")
+
+    pdf.output(ruta_salida)
+    return ruta_salida
+
+def _descargar_fotos_desde_storage(fotos_urls):
+    locales = []
+    if not fotos_urls: return locales
+    for ruta in fotos_urls:
+        try:
+            res = supabase.storage.from_("reportes-mantenimiento").download(ruta)
+            ext = os.path.splitext(ruta)[1] or ".jpg"
+            tmp = tempfile.NamedTemporaryFile(delete=False, suffix=ext)
+            tmp.write(res)
+            tmp.close()
+            locales.append(tmp.name)
+        except Exception as ex:
+            print(f"Error descargando foto {ruta}: {ex}")
+    return locales
+# =====================================================================
+# FIN DE FUNCIONES MAESTRAS PARA DISEÑO DE PDF
+# =====================================================================
+
+# ... existing code ...
 def registrar_y_generar_acta(funcionario_combo, serie_combo, fecha, tipo, checks, desc_extra, tecnico, costo, proximo, fotos_paths, estado_fotos_camara, nombre_admin, nombre_tecnico, nombre_func, plantilla_logico, plantilla_fisico, request: gr.Request):
     usuario = request.username if request else "Sistema"
-    if not funcionario_combo or not serie_combo or not fecha or not tipo: 
+    if not funcionario_combo or not serie_combo or not fecha or not tipo:
         return "⚠️ Faltan datos obligatorios.", [["-", "-", "-", "-", "-", "-", "-"]], gr.update(visible=False, value=None)
 
     if fotos_paths is None:
         fotos_paths = []
     elif not isinstance(fotos_paths, list):
         fotos_paths = [fotos_paths]
-        
+
     if estado_fotos_camara:
-        if isinstance(estado_fotos_camara, list): fotos_paths.extend(estado_fotos_camara)
-        else: fotos_paths.append(estado_fotos_camara)
+        if isinstance(estado_fotos_camara, list):
+            fotos_paths.extend(estado_fotos_camara)
+        else:
+            fotos_paths.append(estado_fotos_camara)
 
     nombre_custodio = str(funcionario_combo).split(" - ")[0].strip() if funcionario_combo else "Sin Asignar"
-    
-    # MAGIA DE REEMPLAZO DINÁMICO
+
     textos_trabajos = []
     if checks:
         for c in checks:
@@ -241,183 +432,77 @@ def registrar_y_generar_acta(funcionario_combo, serie_combo, fecha, tipo, checks
                 textos_trabajos.append(f"MANTENIMIENTO FÍSICO:\n{plantilla_fisico}")
             else:
                 textos_trabajos.append(f"  - {c}")
-                
+
     trabajos_str = "\n\n".join(textos_trabajos)
     if trabajos_str and desc_extra:
         desc_final = f"{trabajos_str}\n\nOBSERVACIONES:\n{desc_extra}"
     else:
         desc_final = trabajos_str or desc_extra or "Revisión general."
-        
+
     equipos_str = ", ".join([s.split(" - ")[0].strip() for s in serie_combo])
-    
+
     try:
         res_f = supabase.table("funcionarios").select("id, departamento").eq("nombres_completos", nombre_custodio).execute()
         f_id = res_f.data[0]['id'] if res_f.data else None
-        depto_custodio = res_f.data[0].get('departamento', 'Sin Área') if res_f.data else 'Sin Área'
-        
+
         datos_mant = {
             "funcionario_id": f_id, "fecha": fecha, "tipo": tipo,
             "tecnico": tecnico, "equipos_afectados": equipos_str,
             "descripcion": desc_final, "costo": float(costo or 0),
-            "proximo_mantenimiento": proximo
+            "proximo_mantenimiento": proximo,
+            "nombre_admin_firma": (nombre_admin or "Administrador").strip(),
+            "nombre_tecnico_firma": (nombre_tecnico or tecnico or "Técnico").strip(),
+            "nombre_funcionario_firma": (nombre_func or nombre_custodio).strip(),
         }
         res_ins = supabase.table("mantenimientos").insert(datos_mant).execute()
         mant_id = res_ins.data[0]['id'] if res_ins.data else "TEMP"
 
-        
-
-        pdf = FPDF()
-        pdf.add_page()
-
-        def l(txt): return str(txt).encode('latin-1', 'replace').decode('latin-1')
-
-        def encabezado_seccion(titulo):
-            pdf.set_fill_color(*COLOR_HEADER_FILL)
-            pdf.set_text_color(0, 0, 0)
-            pdf.set_font("Arial", 'B', 11)
-            pdf.cell(0, 8, l(titulo), 0, 1, 'L', fill=True)
-            pdf.ln(2)
-
         numero_reporte = generar_numero_reporte(tecnico, mant_id)
 
-        # TÍTULO
-        pdf.set_font("Arial", 'B', 16)
-        pdf.cell(0, 10, l("REPORTE DE MANTENIMIENTO"), ln=True, align='C')
-        pdf.set_font("Arial", '', 10)
-        pdf.cell(0, 6, l(f"N. Reporte: {numero_reporte}"), ln=True, align='C')
-        pdf.ln(4)
-
-        # DATOS GENERALES
-        encabezado_seccion("DATOS GENERALES")
-        pdf.set_font("Arial", '', 10)
-        pdf.cell(0, 6, l(f"Fecha de intervencion: {fecha}"), 0, 1)
-        pdf.cell(0, 6, l(f"Tipo de Mantenimiento: {tipo}"), 0, 1)
-        pdf.cell(0, 6, l(f"Empresa / Tecnico: {tecnico or 'No especificado'}"), 0, 1)
-        pdf.cell(0, 6, l(f"Custodio a cargo: {nombre_custodio}"), 0, 1)
-        pdf.ln(4)
-
-        # EQUIPOS INTERVENIDOS
-        encabezado_seccion("EQUIPOS INTERVENIDOS")
-        pdf.set_font("Arial", '', 10)
-        for eq in serie_combo:
-            pdf.multi_cell(0, 6, l(f"- {eq.strip()}"), new_x="LMARGIN", new_y="NEXT")
-        pdf.ln(4)
-
-        # TRABAJOS REALIZADOS
-        encabezado_seccion("TRABAJOS REALIZADOS")
-        if checks:
-            for c in checks:
-                if c == "Mantenimiento Lógico":
-                    pdf.set_font("Arial", 'B', 10)
-                    pdf.multi_cell(0, 6, l("MANTENIMIENTO LÓGICO:"), new_x="LMARGIN", new_y="NEXT")
-                    pdf.set_font("Arial", '', 10)
-                    pdf.multi_cell(0, 6, l(plantilla_logico), new_x="LMARGIN", new_y="NEXT")
-                    pdf.ln(2)
-                elif c == "Mantenimiento Físico":
-                    pdf.set_font("Arial", 'B', 10)
-                    pdf.multi_cell(0, 6, l("MANTENIMIENTO FÍSICO:"), new_x="LMARGIN", new_y="NEXT")
-                    pdf.set_font("Arial", '', 10)
-                    pdf.multi_cell(0, 6, l(plantilla_fisico), new_x="LMARGIN", new_y="NEXT")
-                    pdf.ln(2)
-                else:
-                    pdf.set_font("Arial", '', 10)
-                    pdf.multi_cell(0, 6, l(f"- {c}"), new_x="LMARGIN", new_y="NEXT")
-        pdf.ln(4)
-
-        # CONCLUSIONES Y RECOMENDACIONES
-        encabezado_seccion("CONCLUSIONES Y RECOMENDACIONES")
-        pdf.set_font("Arial", '', 10)
-        pdf.multi_cell(0, 6, l(desc_extra if desc_extra else "Sin observaciones adicionales."), new_x="LMARGIN", new_y="NEXT")
-        pdf.ln(4)
-
-       # FIRMAS DE CONFORMIDAD
-        encabezado_seccion("FIRMAS DE CONFORMIDAD")
-        pdf.ln(6)
-
-        w = 63
-        nombres = [
-            (nombre_admin or "Administrador").strip(),
-            (nombre_func or nombre_custodio).strip(),
-            (nombre_tecnico or tecnico or "Técnico").strip(),
-        ]
-        roles = ["Administrador", "Funcionario", "Tecnico"]
-
-        y_start = pdf.get_y()
-        pdf.set_font("Arial", 'B', 10)
-        y_max = y_start
-        for i, nom in enumerate(nombres):
-            x = pdf.l_margin + i * w
-            pdf.set_xy(x, y_start)
-            pdf.multi_cell(w, 5, l(nom), align='C', new_x="LMARGIN", new_y="LAST")
-            if pdf.get_y() > y_max:
-                y_max = pdf.get_y()
-
-        y_roles = y_max + 4          # <-- antes era +1, ahora +4 (más espacio)
-        pdf.set_font("Arial", '', 9)
-        for i, rol in enumerate(roles):
-            x = pdf.l_margin + i * w
-            pdf.set_xy(x, y_roles)
-            pdf.multi_cell(w, 5, l(rol), align='C', new_x="LMARGIN", new_y="LAST")
-
-        pdf.set_xy(pdf.l_margin, y_roles + 8)   # <-- antes era +6, ahora +8 para separar la nota de fotos también
-
-        if fotos_paths and len(fotos_paths) > 0:
-            pdf.set_font("Arial", 'I', 9)
-            pdf.multi_cell(0, 6, l("* Nota aclaratoria: Adjunto a este documento se encuentra el respaldo fotografico del presente servicio."), new_x="LMARGIN", new_y="NEXT")
-        if fotos_paths and len(fotos_paths) > 0:
-            pdf.add_page()
-            encabezado_seccion("REGISTRO FOTOGRAFICO")
-
-            y_offset = pdf.get_y()
-            max_img_width = 180
-            max_img_height = 110
-
+        fotos_urls_guardadas = []
+        if fotos_paths:
             for idx, fp in enumerate(fotos_paths):
                 try:
-                    img = Image.open(fp)
-                    if img.mode == 'RGBA':
-                        img = img.convert('RGB')
+                    with open(fp, "rb") as fimg:
+                        img_bytes = fimg.read()
+                    ruta_storage = f"fotos/{numero_reporte}/foto_{idx+1}.jpg"
+                    supabase.storage.from_("reportes-mantenimiento").upload(
+                        ruta_storage, img_bytes, {"content-type": "image/jpeg", "upsert": "true"}
+                    )
+                    fotos_urls_guardadas.append(ruta_storage)
+                except Exception as ex:
+                    print(f"Error subiendo foto: {ex}")
 
-                    with tempfile.NamedTemporaryFile(delete=False, suffix='.jpg') as tmp:
-                        img.save(tmp.name, 'JPEG', quality=85)
-                        tmp_path = tmp.name
-
-                    img_w, img_h = img.size
-                    ratio = min(max_img_width/img_w, max_img_height/img_h)
-                    new_w = img_w * ratio
-                    new_h = img_h * ratio
-
-                    if y_offset + new_h > 280:
-                        pdf.add_page()
-                        y_offset = 20
-
-                    center_x = (210 - new_w) / 2
-                    pdf.image(tmp_path, x=center_x, y=y_offset, w=new_w, h=new_h)
-                    y_offset += new_h + 10
-
-                    pdf.set_y(y_offset)
-                    pdf.set_font("Arial", 'I', 9)
-                    pdf.cell(0, 5, l(f"Evidencia {idx+1}"), 0, 1, 'C')
-                    y_offset += 10
-
-                    try: os.remove(tmp_path)
-                    except: pass
-
-                except Exception as ex: print(f"Error insertando foto {fp}: {ex}")
+        supabase.table("mantenimientos").update({
+            "numero_reporte": numero_reporte,
+            "fotos_urls": fotos_urls_guardadas
+        }).eq("id", mant_id).execute()
 
         nombre_archivo = f"Reporte_{numero_reporte}.pdf"
         ruta_pdf = os.path.join(tempfile.gettempdir(), nombre_archivo)
-        pdf.output(ruta_pdf)
+
+        _generar_pdf_completo(
+            numero_reporte, fecha, tipo, tecnico, nombre_custodio,
+            serie_combo, desc_final,
+            nombre_admin, nombre_tecnico, nombre_func,
+            fotos_paths, ruta_pdf
+        )
 
         with open(ruta_pdf, "rb") as f:
             pdf_bytes = f.read()
-        supabase.storage.from_("reportes-mantenimiento").upload(f"mantenimientos/{nombre_archivo}", pdf_bytes, {"content-type": "application/pdf"})
+        supabase.storage.from_("reportes-mantenimiento").upload(
+            f"mantenimientos/{nombre_archivo}", pdf_bytes,
+            {"content-type": "application/pdf", "upsert": "true"}
+        )
 
         registrar_auditoria(usuario, f"Registró mantenimiento {numero_reporte} para {nombre_custodio} ({equipos_str}).")
 
         return f"✅ Mantenimiento {numero_reporte} registrado y reporte PDF generado correctamente.", cargar_historial_por_funcionario(funcionario_combo), gr.update(value=ruta_pdf, visible=True)
 
-    except Exception as e: return f"❌ Error guardando mantenimiento: {e}", cargar_historial_por_funcionario(funcionario_combo), gr.update(visible=False, value=None)
+    except Exception as e:
+        return f"❌ Error guardando mantenimiento: {e}", cargar_historial_por_funcionario(funcionario_combo), gr.update(visible=False, value=None)
+# ... existing code ...
+
 
 
 def obtener_mantenimientos_lista_por_funcionario(funcionario_combo):
@@ -433,74 +518,236 @@ def obtener_mantenimientos_lista_por_funcionario(funcionario_combo):
         return gr.update(choices=choices, value=None)
     except: return gr.update(choices=[], value=None)
 
+import re
+
+def _formatear_trabajos(pdf, l, descripcion):
+    """Escribe el bloque de trabajos, poniendo en negrita 
+    'MANTENIMIENTO LÓGICO:' y 'MANTENIMIENTO FÍSICO:' si aparecen."""
+    partes = re.split(r'(?i)(MANTENIMIENTO L[ÓO]GICO:|MANTENIMIENTO F[ÍI]SICO:)', descripcion)
+    for parte in partes:
+        parte = parte.strip()
+        if not parte:
+            continue
+        if re.match(r'(?i)^MANTENIMIENTO (L[ÓO]GICO|F[ÍI]SICO):$', parte):
+            pdf.set_font("Arial", 'B', 10)
+            pdf.multi_cell(0, 6, l(parte), new_x="LMARGIN", new_y="NEXT")
+            pdf.set_font("Arial", '', 10)
+        else:
+            pdf.multi_cell(0, 6, l(parte), new_x="LMARGIN", new_y="NEXT")
+    pdf.ln(2)
+
 def descargar_reporte_mantenimiento(registro_combo):
-    if not registro_combo: return gr.update(visible=False, value=None), "⚠️ Selecciona un registro primero."
+    if not registro_combo:
+        return gr.update(visible=False, value=None), "⚠️ Selecciona un registro primero."
     try:
         mant_id = registro_combo.split(" - ")[0].replace("ID:", "").strip()
-        res_m = supabase.table("mantenimientos").select("tecnico").eq("id", mant_id).execute()
-        tecnico_bd = res_m.data[0].get("tecnico", "") if res_m.data else ""
-        numero_reporte = generar_numero_reporte(tecnico_bd, mant_id)
+
+        res_m = supabase.table("mantenimientos").select("*").eq("id", mant_id).execute()
+        if not res_m.data:
+            return gr.update(visible=False, value=None), f"❌ El registro ID {mant_id} no existe en la base de datos."
+
+        m_data = res_m.data[0]
+        num_raw = m_data.get("numero_reporte")
+        tecnico = m_data.get("tecnico", "")
+
+        numero_existente = str(num_raw or "").replace("Reporte_", "").replace(".pdf", "").strip()
+        if not numero_existente or numero_existente.lower() in ["none", "null", "empty", ""]:
+            numero_reporte = generar_numero_reporte(tecnico, mant_id)
+            supabase.table("mantenimientos").update({"numero_reporte": numero_reporte}).eq("id", mant_id).execute()
+        else:
+            numero_reporte = numero_existente
+
         nombre_archivo = f"Reporte_{numero_reporte}.pdf"
-        res = supabase.storage.from_("reportes-mantenimiento").download(f"mantenimientos/{nombre_archivo}")
         ruta_local = os.path.join(tempfile.gettempdir(), nombre_archivo)
-        with open(ruta_local, "wb") as f: f.write(res)
-        return gr.update(value=ruta_local, visible=True), f"✅ Reporte {numero_reporte} descargado."
-    except Exception as e: return gr.update(visible=False, value=None), f"❌ Error o reporte no existe: {e}"
+
+        try:
+            res = supabase.storage.from_("reportes-mantenimiento").download(f"mantenimientos/{nombre_archivo}")
+            with open(ruta_local, "wb") as f:
+                f.write(res)
+            return gr.update(value=ruta_local, visible=True), f"✅ Reporte {numero_reporte} descargado."
+        except Exception:
+            fecha = m_data.get("fecha", "")[:10] if m_data.get("fecha") else ""
+            tipo = m_data.get("tipo", "Preventivo")
+            descripcion = m_data.get("descripcion", "")
+            equipos_afectados = m_data.get("equipos_afectados", "Sin equipos especificados")
+            equipos_lista = [e.strip() for e in str(equipos_afectados).split(",")]
+
+            nombre_custodio = "Sin Asignar"
+            f_id_custodio = m_data.get("funcionario_id")
+            if f_id_custodio:
+                try:
+                    res_f = supabase.table("funcionarios").select("nombres_completos").eq("id", f_id_custodio).execute()
+                    if res_f.data:
+                        nombre_custodio = res_f.data[0].get("nombres_completos", "Sin Asignar")
+                except:
+                    pass
+
+            nombre_admin_firma = m_data.get("nombre_admin_firma") or "Administrador"
+            nombre_tecnico_firma = m_data.get("nombre_tecnico_firma") or tecnico or "Técnico"
+            nombre_func_firma = m_data.get("nombre_funcionario_firma") or nombre_custodio
+
+            fotos_urls = m_data.get("fotos_urls") or []
+            fotos_locales = _descargar_fotos_desde_storage(fotos_urls)
+
+            _generar_pdf_completo(
+                numero_reporte, fecha, tipo, tecnico, nombre_custodio,
+                equipos_lista, descripcion,
+                nombre_admin_firma, nombre_tecnico_firma, nombre_func_firma,
+                fotos_locales, ruta_local
+            )
+
+            for fp in fotos_locales:
+                try: os.remove(fp)
+                except: pass
+
+            with open(ruta_local, "rb") as f:
+                pdf_bytes = f.read()
+            supabase.storage.from_("reportes-mantenimiento").upload(
+                f"mantenimientos/{nombre_archivo}", pdf_bytes,
+                {"content-type": "application/pdf", "upsert": "true"}
+            )
+
+            return gr.update(value=ruta_local, visible=True), f"✅ PDF regenerado y descargado exitosamente ({numero_reporte})."
+    except Exception as e:
+        return gr.update(visible=False, value=None), f"❌ Error al descargar o autogenerar: {e}"
+# ... existing code ...
+
+def guardar_edicion_mantenimiento(
+    registro_combo, fecha, proximo, tipo, tecnico, descripcion, costo,
+    nombre_admin_firma, nombre_tecnico_firma, nombre_funcionario_firma,
+    request: gr.Request
+):
+    usuario = request.username if request else "Sistema"
+    if not registro_combo:
+        return "⚠️ Selecciona un registro primero."
+    try:
+        mant_id = registro_combo.split(" - ")[0].replace("ID:", "").strip()
+
+        res_old = supabase.table("mantenimientos").select("numero_reporte").eq("id", mant_id).execute()
+        old_data = res_old.data[0] if res_old.data else {}
+        num_raw = old_data.get("numero_reporte")
+
+        numero_existente = str(num_raw or "").replace("Reporte_", "").replace(".pdf", "").strip()
+        if not numero_existente or numero_existente.lower() in ["none", "null", "empty", ""]:
+            numero_reporte = generar_numero_reporte(tecnico, mant_id)
+            supabase.table("mantenimientos").update({"numero_reporte": numero_reporte}).eq("id", mant_id).execute()
+        else:
+            numero_reporte = numero_existente
+
+        datos_actualizar = {
+            "fecha": fecha,
+            "proximo_mantenimiento": proximo,
+            "tipo": tipo,
+            "tecnico": tecnico,
+            "descripcion": descripcion,
+            "costo": float(costo or 0),
+            "nombre_admin_firma": nombre_admin_firma,
+            "nombre_tecnico_firma": nombre_tecnico_firma,
+            "nombre_funcionario_firma": nombre_funcionario_firma
+        }
+        supabase.table("mantenimientos").update(datos_actualizar).eq("id", mant_id).execute()
+
+        res_m = supabase.table("mantenimientos").select("*").eq("id", mant_id).execute()
+        m_data = res_m.data[0]
+        equipos_afectados = m_data.get("equipos_afectados", "Sin equipos especificados")
+        equipos_lista = [e.strip() for e in str(equipos_afectados).split(",")]
+
+        nombre_custodio = "Sin Asignar"
+        f_id_custodio = m_data.get("funcionario_id")
+        if f_id_custodio:
+            try:
+                res_f = supabase.table("funcionarios").select("nombres_completos").eq("id", f_id_custodio).execute()
+                if res_f.data:
+                    nombre_custodio = res_f.data[0].get("nombres_completos", "Sin Asignar")
+            except:
+                pass
+
+        fotos_urls = m_data.get("fotos_urls") or []
+        fotos_locales = _descargar_fotos_desde_storage(fotos_urls)
+
+        nombre_archivo = f"Reporte_{numero_reporte}.pdf"
+        ruta_pdf = os.path.join(tempfile.gettempdir(), nombre_archivo)
+
+        # Usamos la función maestra de diseño
+        _generar_pdf_completo(
+            numero_reporte, fecha, tipo, tecnico, nombre_custodio,
+            equipos_lista, descripcion,
+            nombre_admin_firma, nombre_tecnico_firma, nombre_funcionario_firma,
+            fotos_locales, ruta_pdf
+        )
+
+        for fp in fotos_locales:
+            try: os.remove(fp)
+            except: pass
+
+        with open(ruta_pdf, "rb") as f:
+            pdf_bytes = f.read()
+
+        supabase.storage.from_("reportes-mantenimiento").upload(
+            f"mantenimientos/{nombre_archivo}", pdf_bytes,
+            {"content-type": "application/pdf", "upsert": "true"}
+        )
+
+        registrar_auditoria(usuario, f"Editó mantenimiento ID: {mant_id} (N. Reporte intocable: {numero_reporte}).")
+        return f"✅ Registro {mant_id} actualizado. (Reporte conservado intacto: {numero_reporte})"
+    except Exception as e:
+        return f"❌ Error al guardar edición: {e}"
+# ... existing code ...
 
 def eliminar_mantenimiento(registro_combo, request: gr.Request):
     usuario = request.username if request else "Sistema"
     if not registro_combo: return "⚠️ Selecciona un registro para eliminar."
     try:
         mant_id = registro_combo.split(" - ")[0].replace("ID:", "").strip()
-        res_m = supabase.table("mantenimientos").select("tecnico").eq("id", mant_id).execute()
-        tecnico_bd = res_m.data[0].get("tecnico", "") if res_m.data else ""
-        numero_reporte = generar_numero_reporte(tecnico_bd, mant_id)
+        res_m = supabase.table("mantenimientos").select("numero_reporte, tecnico").eq("id", mant_id).execute()
+        numero_reporte = res_m.data[0].get("numero_reporte") if res_m.data else None
         supabase.table("mantenimientos").delete().eq("id", mant_id).execute()
-        nombre_archivo = f"Reporte_{numero_reporte}.pdf"
-        try: supabase.storage.from_("reportes-mantenimiento").remove([f"mantenimientos/{nombre_archivo}"])
-        except: pass
+        if numero_reporte:
+            numero_reporte = str(numero_reporte).replace("Reporte_", "").replace(".pdf", "").strip()
+            nombre_archivo = f"Reporte_{numero_reporte}.pdf"
+            try: supabase.storage.from_("reportes-mantenimiento").remove([f"mantenimientos/{nombre_archivo}"])
+            except: pass
         registrar_auditoria(usuario, f"Eliminó mantenimiento ID: {mant_id}.")
         return f"🗑️ Mantenimiento {mant_id} eliminado de la base de datos y almacenamiento."
     except Exception as e: return f"❌ Error al eliminar: {e}"
 
 def cargar_datos_mantenimiento_edicion(registro_combo):
-    if not registro_combo: return "", "", "", "", "", 0.0, gr.update(visible=False, value=None)
+    if not registro_combo:
+        return "", "", "", "", "", 0.0, "", "", "", gr.update(visible=False, value=None)
     try:
         mant_id = registro_combo.split(" - ")[0].replace("ID:", "").strip()
         res = supabase.table("mantenimientos").select("*").eq("id", mant_id).execute()
-        if not res.data: return "", "", "", "", "", 0.0, gr.update(visible=False, value=None)
+        if not res.data:
+            return "", "", "", "", "", 0.0, "", "", "", gr.update(visible=False, value=None)
 
         m = res.data[0]
         fecha = m.get("fecha", "")[:10] if m.get("fecha") else ""
         proximo = m.get("proximo_mantenimiento", "")[:10] if m.get("proximo_mantenimiento") else ""
-        numero_reporte = generar_numero_reporte(m.get("tecnico", ""), mant_id)
+        numero_reporte = m.get("numero_reporte")
+        numero_reporte = str(numero_reporte).replace("Reporte_", "").replace(".pdf", "").strip()
 
         ruta_local = None
         try:
-            nombre_archivo = f"Reporte_{numero_reporte}.pdf"
-            res_pdf = supabase.storage.from_("reportes-mantenimiento").download(f"mantenimientos/{nombre_archivo}")
-            ruta_local = os.path.join(tempfile.gettempdir(), f"Visor_{nombre_archivo}")
-            with open(ruta_local, "wb") as f: f.write(res_pdf)
-            visor_update = gr.update(value=ruta_local, visible=True)
+            if numero_reporte:
+                nombre_archivo = f"Reporte_{numero_reporte}.pdf"
+                res_pdf = supabase.storage.from_("reportes-mantenimiento").download(f"mantenimientos/{nombre_archivo}")
+                ruta_local = os.path.join(tempfile.gettempdir(), f"Visor_{nombre_archivo}")
+                with open(ruta_local, "wb") as f: f.write(res_pdf)
+                visor_update = gr.update(value=ruta_local, visible=True)
+            else:
+                visor_update = gr.update(visible=False, value=None)
         except: visor_update = gr.update(visible=False, value=None)
 
-        return fecha, proximo, m.get("tipo", ""), m.get("tecnico", ""), m.get("descripcion", ""), float(m.get("costo", 0.0)), visor_update
-    except Exception as e: return "", "", "", "", "", 0.0, gr.update(visible=False, value=None)
-
-def guardar_edicion_mantenimiento(registro_combo, fecha, proximo, tipo, tecnico, descripcion, costo, request: gr.Request):
-    usuario = request.username if request else "Sistema"
-    if not registro_combo: return "⚠️ Selecciona un registro primero."
-    try:
-        mant_id = registro_combo.split(" - ")[0].replace("ID:", "").strip()
-        datos_actualizar = {
-            "fecha": fecha, "proximo_mantenimiento": proximo,
-            "tipo": tipo, "tecnico": tecnico,
-            "descripcion": descripcion, "costo": float(costo or 0)
-        }
-        supabase.table("mantenimientos").update(datos_actualizar).eq("id", mant_id).execute()
-        registrar_auditoria(usuario, f"Editó planificación del mantenimiento ID: {mant_id}.")
-        return f"✅ Registro {mant_id} actualizado correctamente en la base de datos."
-    except Exception as e: return f"❌ Error al guardar edición: {e}"
+        return (
+            fecha, proximo, m.get("tipo", ""), m.get("tecnico", ""),
+            m.get("descripcion", ""), float(m.get("costo", 0.0)),
+            m.get("nombre_admin_firma", "") or "",
+            m.get("nombre_tecnico_firma", "") or "",
+            m.get("nombre_funcionario_firma", "") or "",
+            visor_update
+        )
+    except Exception as e:
+        return "", "", "", "", "", 0.0, "", "", "", gr.update(visible=False, value=None)
 
 def analizar_fase_precontractual(archivos_pdf, referencias_pdf, enlaces, request: gr.Request):
     usuario = request.username if request else "Sistema"
@@ -1048,7 +1295,7 @@ def gestionar_usuario_admin(usuario_mod, clave_mod, rol_mod, request: gr.Request
 def generar_respaldo_manual(request: gr.Request):
     usuario = request.username if request else "Sistema"
     try:
-        tablas = ["funcionarios", "ordenes_compra", "equipos", "mantenimientos", "auditoria", "usuarios_sistema"]
+        tablas = ["funcionarios", "ordenes_compra", "equipos", "mantenimientos", "auditoria_sistema", "usuarios_sistema"]
         respaldo = {}
         for t in tablas: respaldo[t] = supabase.table(t).select("*").execute().data
         
@@ -1069,7 +1316,7 @@ def restaurar_base_datos(archivo_json, request: gr.Request):
         with open(archivo_json, "r", encoding="utf-8") as f:
             datos_respaldo = json.load(f)
             
-        tablas_orden = ["usuarios_sistema", "funcionarios", "ordenes_compra", "equipos", "mantenimientos", "auditoria"]
+        tablas_orden = ["usuarios_sistema", "funcionarios", "ordenes_compra", "equipos", "mantenimientos", "auditoria_sistema"]
         total_registros = 0
         
         for tabla in tablas_orden:
@@ -1354,7 +1601,7 @@ with gr.Blocks() as erp_interfaz:
                     with gr.Row():
                         btn_descargar_reporte = gr.Button("📥 Descargar PDF", variant="secondary")
                         btn_eliminar_mant = gr.Button("🗑️ Eliminar Registro", variant="stop")
-                    archivo_reporte_descarga = gr.File(label="📄 Reporte Descargado", visible=False)
+                    archivo_reporte_descarga = gr.File(label="📄 Reporte Descargado", interactive=False)
                     msg_eliminar = gr.Textbox(show_label=False, interactive=False)
                     
                     with gr.Accordion("✏️ Editar Registro Seleccionado (Planificación)", open=False):
@@ -1363,8 +1610,17 @@ with gr.Blocks() as erp_interfaz:
                         edit_proximo = gr.Textbox(label="Próximo Mantenimiento (YYYY-MM-DD)", elem_classes="fecha-calendario")
                         edit_tipo = gr.Dropdown(label="Tipo", choices=["Preventivo", "Correctivo", "Revisión de Garantía", "De Baja", "Diagnóstico"])
                         edit_tecnico = gr.Textbox(label="Técnico/Empresa")
+                        edit_nombre_admin = gr.Textbox(label="Firma: Administrador")    
+                        edit_nombre_tecnico = gr.Textbox(label="Firma: Técnico")
+                        edit_nombre_funcionario = gr.Textbox(label="Firma: Funcionario")
                         edit_desc = gr.Textbox(label="Descripción / Trabajos", lines=4)
                         edit_costo = gr.Number(label="Costo ($)")
+                        edit_desc = gr.Textbox(label="Descripción / Trabajos", lines=4)
+                        edit_costo = gr.Number(label="Costo ($)")
+                        gr.Markdown("**Firmas de Conformidad**")
+                        edit_nombre_admin = gr.Textbox(label="Firma: Administrador")
+                        edit_nombre_tecnico = gr.Textbox(label="Firma: Técnico")
+                        edit_nombre_funcionario = gr.Textbox(label="Firma: Funcionario")
                         btn_guardar_edicion_mant = gr.Button("💾 Guardar Edición (Actualiza BD)", variant="primary")
                         msg_edicion_mant = gr.Textbox(show_label=False, interactive=False)
                         
@@ -1493,15 +1749,16 @@ with gr.Blocks() as erp_interfaz:
     registro_eliminar.change(
         fn=cargar_datos_mantenimiento_edicion,
         inputs=[registro_eliminar],
-        outputs=[edit_fecha, edit_proximo, edit_tipo, edit_tecnico, edit_desc, edit_costo, visor_pdf_edicion]
+        outputs=[edit_fecha, edit_proximo, edit_tipo, edit_tecnico, edit_desc, edit_costo,
+                 edit_nombre_admin, edit_nombre_tecnico, edit_nombre_funcionario, visor_pdf_edicion]
     )
 
     btn_guardar_edicion_mant.click(
         fn=guardar_edicion_mantenimiento,
-        inputs=[registro_eliminar, edit_fecha, edit_proximo, edit_tipo, edit_tecnico, edit_desc, edit_costo],
+        inputs=[registro_eliminar, edit_fecha, edit_proximo, edit_tipo, edit_tecnico, edit_desc, edit_costo,
+                edit_nombre_admin, edit_nombre_tecnico, edit_nombre_funcionario],
         outputs=[msg_edicion_mant]
     ).then(fn=cargar_historial_por_funcionario, inputs=[custodio_mantenimiento], outputs=[tabla_mantenimientos])
-
 
     btn_respaldo.click(fn=generar_respaldo_manual, inputs=[], outputs=[archivo_respaldo, msg_respaldo])
     tabla_usuarios.select(fn=seleccionar_usuario_tabla, inputs=[tabla_usuarios], outputs=[usuario_db_in, rol_db_in, buscar_usuario_combo])
